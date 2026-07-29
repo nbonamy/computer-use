@@ -32,12 +32,24 @@ private final class LaunchApplicationResult: @unchecked Sendable {
 @MainActor
 public final class AccessibilityPilot {
   private let cursorOverlay: ComputerUseCursorOverlay
+  private let initialCursorPresenter: () -> Void
+  private var didPresentInitialCursor = false
 
   public init(cursorOverlay: ComputerUseCursorOverlay = ComputerUseCursorOverlay()) {
     self.cursorOverlay = cursorOverlay
+    self.initialCursorPresenter = { cursorOverlay.showAtMainScreenCenter() }
+  }
+
+  init(
+    cursorOverlay: ComputerUseCursorOverlay = ComputerUseCursorOverlay(),
+    initialCursorPresenter: @escaping () -> Void
+  ) {
+    self.cursorOverlay = cursorOverlay
+    self.initialCursorPresenter = initialCursorPresenter
   }
 
   public func handle(_ request: PilotRequest) -> PilotResponse {
+    presentInitialCursorIfNeeded()
     switch request.command {
     case "ping":
       return .success(id: request.id, result: .object(["success": .bool(true)]))
@@ -72,6 +84,14 @@ public final class AccessibilityPilot {
     default:
       return .failure(id: request.id, code: "unknown_command", message: "Unknown command \(request.command).")
     }
+  }
+
+  private func presentInitialCursorIfNeeded() {
+    guard !didPresentInitialCursor else {
+      return
+    }
+    didPresentInitialCursor = true
+    initialCursorPresenter()
   }
 
   private func accessibilityGuard(id: String?, operation: () throws -> JSONValue) -> PilotResponse {

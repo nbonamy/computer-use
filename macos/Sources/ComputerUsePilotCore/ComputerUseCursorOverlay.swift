@@ -21,6 +21,16 @@ public final class ComputerUseCursorOverlay: NSObject {
     super.init()
   }
 
+  public func showAtMainScreenCenter() {
+    guard let screen = NSScreen.main ?? NSScreen.screens.first else {
+      return
+    }
+    let displayID = (screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber)
+      .map { CGDirectDisplayID($0.uint32Value) }
+    let bounds = displayID.map(CGDisplayBounds) ?? screen.frame
+    showClick(at: CGPoint(x: bounds.midX, y: bounds.midY))
+  }
+
   @discardableResult
   public func showClick(at point: CGPoint) -> TimeInterval {
     let overlayFrame = screen(containing: point)?.frame ?? NSScreen.main?.frame ?? .zero

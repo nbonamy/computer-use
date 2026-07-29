@@ -8,6 +8,17 @@ final class PilotProtocolTests: XCTestCase {
     XCTAssertEqual(computerUseCursorAnimationDuration(for: 2_000), 0.55)
   }
 
+  @MainActor
+  func testPilotPresentsTheInitialCursorOnlyOnTheFirstRequest() {
+    var presentationCount = 0
+    let pilot = AccessibilityPilot(initialCursorPresenter: { presentationCount += 1 })
+
+    _ = pilot.handle(PilotRequest(id: "first", command: "ping"))
+    _ = pilot.handle(PilotRequest(id: "second", command: "ping"))
+
+    XCTAssertEqual(presentationCount, 1)
+  }
+
   func testDecodesRequestWithArguments() throws {
     let data = #"{"id":"abc","command":"snapshot","arguments":{"maxDepth":2,"app":"Finder"}}"#.data(using: .utf8)!
     let request = try JSONDecoder().decode(PilotRequest.self, from: data)
@@ -69,7 +80,7 @@ final class PilotProtocolTests: XCTestCase {
 
   @MainActor
   func testStatusDoesNotRequireAccessibilityPermission() throws {
-    let pilot = AccessibilityPilot()
+    let pilot = AccessibilityPilot(initialCursorPresenter: {})
 
     let response = pilot.handle(PilotRequest(id: "status-1", command: "status"))
 
