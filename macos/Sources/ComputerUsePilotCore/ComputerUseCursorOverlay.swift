@@ -3,6 +3,10 @@ import CoreGraphics
 import Foundation
 import QuartzCore
 
+func computerUseCursorAnimationDuration(for distance: CGFloat) -> TimeInterval {
+  min(0.55, max(0.16, TimeInterval(distance / 1_400)))
+}
+
 /// A visible, click-through marker for actions injected by the Computer Use
 /// helper. This is deliberately an overlay rather than a macOS cursor: macOS
 /// has one hardware cursor and moving it would interfere with the user.
@@ -17,7 +21,8 @@ public final class ComputerUseCursorOverlay: NSObject {
     super.init()
   }
 
-  public func showClick(at point: CGPoint) {
+  @discardableResult
+  public func showClick(at point: CGPoint) -> TimeInterval {
     let overlayFrame = screen(containing: point)?.frame ?? NSScreen.main?.frame ?? .zero
     let panel = panel ?? makePanel(frame: overlayFrame)
     let canvasView = canvasView ?? ComputerUseCursorCanvasView(frame: NSRect(origin: .zero, size: overlayFrame.size))
@@ -31,14 +36,17 @@ public final class ComputerUseCursorOverlay: NSObject {
       y: globalDestination.y - overlayFrame.minY
     )
     let wasVisible = panel.isVisible
+    let movementDuration: TimeInterval
     if wasVisible {
-      canvasView.moveCursor(to: destination, animated: true)
+      movementDuration = canvasView.moveCursor(to: destination, animated: true)
     } else {
-      canvasView.moveCursor(to: destination, animated: false)
+      movementDuration = canvasView.moveCursor(to: destination, animated: false)
     }
     panel.alphaValue = 1
     panel.orderFrontRegardless()
     canvasView.animateActivity()
+    CATransaction.flush()
+    return movementDuration
   }
 
   private func makePanel(frame: NSRect) -> NSPanel {
@@ -156,15 +164,12 @@ private final class ComputerUseCursorCanvasView: NSView {
     fatalError("init(coder:) has not been implemented")
   }
 
-  func moveCursor(to origin: NSPoint, animated: Bool) {
+  @discardableResult
+  func moveCursor(to origin: NSPoint, animated: Bool) -> TimeInterval {
     guard let cursorLayer = cursorView.layer else {
       cursorView.setFrameOrigin(origin)
-      return
+      return 0
     }
-    let destination = CGPoint(
-      x: origin.x + Self.size.width / 2,
-      y: origin.y + Self.size.height / 2
-    )
     let start = cursorLayer.presentation()?.position ?? cursorLayer.position
     cursorLayer.removeAnimation(forKey: "computer-use-position")
 
@@ -176,17 +181,24 @@ private final class ComputerUseCursorCanvasView: NSView {
     CATransaction.setDisableActions(true)
     cursorView.setFrameOrigin(origin)
     CATransaction.commit()
+    // Use the model layer's actual post-AppKit position. Computing this from
+    // the requested frame origin can differ by backing alignment, causing the
+    // presentation layer to stop short and jump when the animation is removed.
+    let destination = cursorLayer.position
+    let distance = hypot(destination.x - start.x, destination.y - start.y)
 
-    guard animated, hypot(destination.x - start.x, destination.y - start.y) >= 0.5 else {
-      return
+    guard animated, distance >= 0.5 else {
+      return 0
     }
 
+    let duration = computerUseCursorAnimationDuration(for: distance)
     let position = CABasicAnimation(keyPath: "position")
     position.fromValue = start
     position.toValue = destination
-    position.duration = 0.65
+    position.duration = duration
     position.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
     cursorLayer.add(position, forKey: "computer-use-position")
+    return duration
   }
 
   func animateActivity() {

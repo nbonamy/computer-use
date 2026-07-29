@@ -408,12 +408,10 @@ public final class AccessibilityPilot {
 
     if let element = try elementByOptionalIndex(arguments: arguments) {
       let point = try? centerPoint(of: element)
-      let method = try activateElement(element, clickCount: clickCount)
       if let point {
-        // AX actions can raise the target application. Draw after the action
-        // so the marker remains above the newly raised window.
         showComputerUseCursor(at: point)
       }
+      let method = try activateElement(element, clickCount: clickCount)
       return .object([
         "click_count": .number(Double(clickCount)),
         "method": .string(method),
@@ -1629,7 +1627,18 @@ public final class AccessibilityPilot {
     )
   }
 
-  private func showComputerUseCursor(at point: CGPoint) { cursorOverlay.showClick(at: point) }
+  private func showComputerUseCursor(at point: CGPoint) {
+    let duration = cursorOverlay.showClick(at: point)
+    guard duration > 0 else {
+      return
+    }
+
+    // The stdio request is synchronous, so keep its response pending while
+    // allowing the main run loop to render the Core Animation frames. This
+    // prevents a following command from interrupting the movement before the
+    // cursor reaches the point where the accessibility action occurs.
+    RunLoop.main.run(until: Date(timeIntervalSinceNow: duration))
+  }
 
   private func postKeyboardText(_ text: String) {
     let source = CGEventSource(stateID: .hidSystemState)

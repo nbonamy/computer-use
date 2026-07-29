@@ -2,6 +2,12 @@ import XCTest
 @testable import ComputerUsePilotCore
 
 final class PilotProtocolTests: XCTestCase {
+  func testCursorAnimationDurationScalesAndStaysWithinHumanMovementBounds() {
+    XCTAssertEqual(computerUseCursorAnimationDuration(for: 10), 0.16)
+    XCTAssertEqual(computerUseCursorAnimationDuration(for: 700), 0.5)
+    XCTAssertEqual(computerUseCursorAnimationDuration(for: 2_000), 0.55)
+  }
+
   func testDecodesRequestWithArguments() throws {
     let data = #"{"id":"abc","command":"snapshot","arguments":{"maxDepth":2,"app":"Finder"}}"#.data(using: .utf8)!
     let request = try JSONDecoder().decode(PilotRequest.self, from: data)
