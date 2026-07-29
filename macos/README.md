@@ -1,0 +1,53 @@
+# Computer Use macOS Pilot
+
+Reusable macOS Accessibility helper for desktop products. It receives newline-delimited JSON on stdin and writes exactly one JSON response per input line to stdout.
+
+This project is deliberately product-neutral: it does not expose MCP tools or own agent approval policy. A consumer owns the model-facing tool schema, starts this executable, packages the resulting app bundle, and signs that bundle with its own identity.
+
+## Development
+
+```bash
+swift build
+swift test
+```
+
+Build a locally signed helper bundle for permission testing:
+
+```bash
+scripts/build-app.sh \
+  --app-name "Example Computer Use" \
+  --bundle-identifier com.example.computer-use \
+  --icon /absolute/path/icon.icns
+```
+
+Optional `--output /absolute/path` selects the output directory. The command prints the generated `.app` path.
+
+## Protocol
+
+Every request has an `id`, `command`, and optional `arguments`. Every response repeats the `id` and has either `ok: true` with `result`, or `ok: false` with a stable structured error.
+
+The public command surface is:
+
+- `status`, `request_accessibility`
+- `list_apps`, `find_apps`, `launch_app`, `focus_app`
+- `get_app_state`, `click`, `type_text`, `set_value`, `scroll`
+
+Coordinate clicks are resolved through macOS Accessibility hit-testing and the
+nearest pressable accessible ancestor. The helper refuses a raw physical click
+when no accessible target exists, because that would move the user's hardware
+cursor. It shows a short-lived, click-through blue cursor halo at click and
+element-scroll targets so users can see Computer Use activity without losing
+control of their own pointer.
+
+`status`, `request_accessibility`, `find_apps`, and `launch_app` do not require Accessibility access. Inspection and mutation commands do.
+
+`get_app_state` returns compact, line-numbered Accessibility text. Element indexes remain valid only while the target app's UI tree has not changed structurally.
+
+## Consumer contract
+
+Consumers must:
+
+1. Gate inspection and mutation behind an explicit user-granted Accessibility status.
+2. Enforce their own action approval policy and model-facing size limits.
+3. Bundle the helper under their own product name, icon, bundle ID, and signing identity.
+4. Never parse diagnostics from stdout; it is protocol-only.
