@@ -9,6 +9,9 @@ packaging, signing, and product branding to the application that embeds it.
 See [the macOS guide](macos/README.md) for requirements, development, and the
 protocol.
 
+See [function-calling integrations](docs/function-calling.md) for the
+recommended agentic-app integration.
+
 ## License
 
 Licensed under the [Apache License 2.0](LICENSE).
