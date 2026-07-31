@@ -43,6 +43,11 @@ control of their own pointer.
 
 `get_app_state` returns compact, line-numbered Accessibility text. Element indexes remain valid only while the target app's UI tree has not changed structurally.
 
+`type_text` requires an explicit app or pid and stops if that process does not
+own both foreground and Accessibility focus. Consumers should use `set_value`
+for ordinary settable controls and reserve synthetic typing for controls that
+need keyboard semantics.
+
 ## Consumer contract
 
 Consumers must:

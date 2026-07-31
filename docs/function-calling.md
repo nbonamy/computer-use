@@ -120,6 +120,9 @@ where ordinary keyboard typing is expected. Use `set_value` only for ordinary
 settable accessibility controls. Keep raw trees, structured element arrays,
 and debug fields opt-in because they can consume significant context.
 
+`type_text` requires an explicit app or pid. The Pilot fails closed if that app
+does not become active or loses Accessibility focus while text is being posted.
+
 ## App responsibilities
 
 | Concern | App adapter | Pilot |

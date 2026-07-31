@@ -29,6 +29,42 @@ final class PilotProtocolTests: XCTestCase {
     XCTAssertEqual(request.arguments["app"]?.stringValue, "Finder")
   }
 
+  @MainActor
+  func testFindAppsRejectsOutOfRangeIntegerWithoutCrashing() throws {
+    let data = #"{"id":"overflow","command":"find_apps","arguments":{"maxResults":1e100}}"#.data(using: .utf8)!
+    let request = try JSONDecoder().decode(PilotRequest.self, from: data)
+    let pilot = AccessibilityPilot(initialCursorPresenter: {})
+
+    let response = pilot.handle(request)
+
+    XCTAssertEqual(response.id, "overflow")
+    XCTAssertEqual(response.ok, false)
+    XCTAssertEqual(response.error?.code, "invalid_request")
+    XCTAssertEqual(response.error?.message, "maxResults must be an integer.")
+  }
+
+  func testIntegerValueRequiresAnExactlyRepresentableInteger() {
+    XCTAssertEqual(JSONValue.number(42).intValue, 42)
+    XCTAssertNil(JSONValue.number(1.5).intValue)
+    XCTAssertNil(JSONValue.number(1e100).intValue)
+    XCTAssertNil(JSONValue.number(.infinity).intValue)
+  }
+
+  @MainActor
+  func testMalformedPIDDoesNotFallBackToTheFrontmostApplication() {
+    let pilot = AccessibilityPilot(initialCursorPresenter: {})
+
+    for pid in [JSONValue.number(1e100), .number(Double(Int32.max) + 1)] {
+      let response = pilot.handle(
+        PilotRequest(id: "invalid-pid", command: "focus_app", arguments: ["pid": pid])
+      )
+
+      XCTAssertEqual(response.ok, true)
+      XCTAssertEqual(response.result?.objectValue?["success"]?.boolValue, false)
+      XCTAssertEqual(response.result?.objectValue?["errorCode"]?.stringValue, "invalid_request")
+    }
+  }
+
   func testDecodesPerformRequestWithSnapshotPath() throws {
     let data = #"{"id":"path-1","command":"perform","arguments":{"action":"type_text","path":"root.children[0].children[1]","text":"hello"}}"#.data(using: .utf8)!
     let request = try JSONDecoder().decode(PilotRequest.self, from: data)

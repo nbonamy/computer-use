@@ -59,7 +59,7 @@ public enum JSONValue: Codable, Equatable, Sendable {
 
   public var intValue: Int? {
     if case .number(let value) = self {
-      return Int(value)
+      return Int(exactly: value)
     }
     return nil
   }

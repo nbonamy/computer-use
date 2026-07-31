@@ -460,9 +460,20 @@ public final class AccessibilityPilot {
     guard let text = arguments["text"]?.stringValue else {
       throw PilotRuntimeError(code: "invalid_request", message: "type_text requires text.")
     }
+    guard arguments["app"] != nil || arguments["pid"] != nil else {
+      throw PilotRuntimeError(code: "invalid_request", message: "type_text requires app or pid.")
+    }
 
-    try activateAppIfRequested(arguments: arguments)
-    postKeyboardText(text)
+    let app = try runningApplication(arguments: arguments)
+    app.activate(options: [.activateAllWindows])
+    waitForActivation(app)
+    guard app.isActive else {
+      throw PilotRuntimeError(
+        code: "action_unavailable",
+        message: "Unable to type because the requested app did not become active."
+      )
+    }
+    try postKeyboardText(text, targetPID: app.processIdentifier)
     return .object([
       "charactersTyped": .number(Double(text.count)),
       "success": .bool(true)
@@ -555,11 +566,11 @@ public final class AccessibilityPilot {
   }
 
   private func rootElement(arguments: [String: JSONValue]) throws -> AXUIElement {
-    if let pid = arguments["pid"]?.intValue {
-      guard NSWorkspace.shared.runningApplications.contains(where: { $0.processIdentifier == pid_t(pid) && !$0.isTerminated }) else {
+    if let pid = try processIdentifierArgument(arguments) {
+      guard NSWorkspace.shared.runningApplications.contains(where: { $0.processIdentifier == pid && !$0.isTerminated }) else {
         throw PilotRuntimeError(code: "app_not_found", message: "No running application has pid \(pid). Refresh app state and use its current pid.")
       }
-      return AXUIElementCreateApplication(pid_t(pid))
+      return AXUIElementCreateApplication(pid)
     }
 
     if let appName = arguments["app"]?.stringValue {
@@ -595,8 +606,13 @@ public final class AccessibilityPilot {
   }
 
   private func runningApplication(arguments: [String: JSONValue]) throws -> NSRunningApplication {
-    if let pid = arguments["pid"]?.intValue,
-       let app = NSRunningApplication(processIdentifier: pid_t(pid)) {
+    if let pid = try processIdentifierArgument(arguments) {
+      guard let app = NSRunningApplication(processIdentifier: pid), !app.isTerminated else {
+        throw PilotRuntimeError(
+          code: "app_not_found",
+          message: "No running application has pid \(pid). Refresh app state and use its current pid."
+        )
+      }
       return app
     }
 
@@ -611,6 +627,19 @@ public final class AccessibilityPilot {
     }
 
     return try frontmostApplication()
+  }
+
+  private func processIdentifierArgument(_ arguments: [String: JSONValue]) throws -> pid_t? {
+    guard let rawPID = arguments["pid"] else {
+      return nil
+    }
+    guard let value = rawPID.intValue, let pid = pid_t(exactly: value), pid > 0 else {
+      throw PilotRuntimeError(
+        code: "invalid_request",
+        message: "pid must be a positive process identifier."
+      )
+    }
+    return pid
   }
 
   private func runningApplication(bundleIdentifier: String?, path: String?) -> NSRunningApplication? {
@@ -968,9 +997,17 @@ public final class AccessibilityPilot {
       return .object(node)
     }
 
-    node["children"] = .array(children.enumerated().map { index, child in
-      snapshotElement(child, path: "\(path).children[\(index)]", depth: depth + 1, maxDepth: maxDepth, remaining: &remaining)
-    })
+    node["children"] = .array(
+      boundedChildNodes(children, remaining: &remaining) { child, index, remaining in
+        snapshotElement(
+          child,
+          path: "\(path).children[\(index)]",
+          depth: depth + 1,
+          maxDepth: maxDepth,
+          remaining: &remaining
+        )
+      }
+    )
     return .object(node)
   }
 
@@ -1018,21 +1055,19 @@ public final class AccessibilityPilot {
     }
 
     var pendingSiblingLabel: String?
-    var childNodes: [JSONValue] = []
-    for (childIndex, child) in children.enumerated() {
-      childNodes.append(
-        indexedSnapshotElement(
-          child,
-          path: "\(path).children[\(childIndex)]",
-          depth: depth + 1,
-          parentRole: role,
-          pendingSiblingLabel: &pendingSiblingLabel,
-          maxDepth: maxDepth,
-          remaining: &remaining,
-          nextIndex: &nextIndex,
-          elements: &elements,
-          treeLines: &treeLines
-        )
+    let childNodes = boundedChildNodes(children, remaining: &remaining) {
+      child, childIndex, remaining in
+      indexedSnapshotElement(
+        child,
+        path: "\(path).children[\(childIndex)]",
+        depth: depth + 1,
+        parentRole: role,
+        pendingSiblingLabel: &pendingSiblingLabel,
+        maxDepth: maxDepth,
+        remaining: &remaining,
+        nextIndex: &nextIndex,
+        elements: &elements,
+        treeLines: &treeLines
       )
     }
     node["children"] = .array(childNodes)
@@ -1660,19 +1695,51 @@ public final class AccessibilityPilot {
     RunLoop.main.run(until: Date(timeIntervalSinceNow: duration))
   }
 
-  private func postKeyboardText(_ text: String) {
+  private func postKeyboardText(_ text: String, targetPID: pid_t) throws {
     let source = CGEventSource(stateID: .hidSystemState)
-    for character in text {
-      switch character {
-      case "\n", "\r":
-        postKey(source: source, keyCode: 36)
-      case "\t":
-        postKey(source: source, keyCode: 48)
-      default:
-        postUnicodeCharacter(source: source, character)
+    let input = TargetBoundKeyboardInput(
+      isTargetFocused: keyboardTargetOwnsFocus,
+      pauseBetweenCharacters: { usleep(5_000) },
+      postCharacter: { [self] character in
+        switch character {
+        case "\n", "\r":
+          postKey(source: source, keyCode: 36)
+        case "\t":
+          postKey(source: source, keyCode: 48)
+        default:
+          postUnicodeCharacter(source: source, character)
+        }
       }
-      usleep(5_000)
+    )
+    do {
+      try input.post(text, targetPID: targetPID)
+    } catch TargetBoundKeyboardInputError.targetLostFocus {
+      throw PilotRuntimeError(
+        code: "action_unavailable",
+        message: "Unable to type because the requested app no longer owns keyboard focus."
+      )
     }
+  }
+
+  private func keyboardTargetOwnsFocus(_ targetPID: pid_t) -> Bool {
+    guard NSWorkspace.shared.frontmostApplication?.processIdentifier == targetPID else {
+      return false
+    }
+
+    let appElement = AXUIElementCreateApplication(targetPID)
+    var focusedValue: CFTypeRef?
+    guard AXUIElementCopyAttributeValue(
+      appElement,
+      kAXFocusedUIElementAttribute as CFString,
+      &focusedValue
+    ) == .success,
+      let focusedValue,
+      CFGetTypeID(focusedValue) == AXUIElementGetTypeID() else {
+      return false
+    }
+
+    let focusedElement = focusedValue as! AXUIElement
+    return focusedElement.pid == targetPID
   }
 
   private func postUnicodeCharacter(source: CGEventSource?, _ character: Character) {
