@@ -2,6 +2,11 @@
 
 Reusable macOS Accessibility helper for desktop products. It receives newline-delimited JSON on stdin and writes exactly one JSON response per input line to stdout.
 
+Consumer release builds should download a versioned archive from the GitHub
+release, verify its SHA-256 checksum, and run its bundled package-app.sh with
+the consumer's app name, bundle identifier, icon, and output directory.
+Consumers still own final signing and notarization.
+
 This project is deliberately product-neutral: it does not expose MCP tools or own agent approval policy. A consumer owns the model-facing tool schema, starts this executable, packages the resulting app bundle, and signs that bundle with its own identity.
 
 ## Development

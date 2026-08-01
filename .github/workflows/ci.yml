@@ -1,0 +1,19 @@
+name: macOS pilot CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run Swift tests
+        run: swift test --package-path macos
+      - name: Build release binary
+        run: swift build --package-path macos -c release
