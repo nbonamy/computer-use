@@ -22,7 +22,9 @@ done
 [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+([-.][0-9A-Za-z.-]+)?$ ]] || usage
 if [[ "$OUTPUT_DIR" != /* ]]; then OUTPUT_DIR="$PWD/$OUTPUT_DIR"; fi
 
-BIN_PATH="$(cd "$PACKAGE_DIR" && swift build -c release --show-bin-path)/computer-use-pilot"
+cd "$PACKAGE_DIR"
+swift build -c release
+BIN_PATH="$(swift build -c release --show-bin-path)/computer-use-pilot"
 RESOURCE_PATH="$PACKAGE_DIR/Sources/ComputerUsePilotCore/Resources/computer-use-cursor.svg"
 STAGE_PARENT="$(mktemp -d /tmp/computer-use-artifact.XXXXXX)"
 STAGE_DIR="$STAGE_PARENT/computer-use-pilot-macos-arm64-$VERSION"
