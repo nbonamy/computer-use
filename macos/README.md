@@ -33,8 +33,9 @@ Every request has an `id`, `command`, and optional `arguments`. Every response r
 
 The public command surface is:
 
-- `status`, `request_accessibility`
+- `status`, `request_accessibility`, `request_screen_capture`
 - `list_apps`, `find_apps`, `launch_app`, `focus_app`
+- `screenshot`
 - `get_app_state`, `click`, `type_text`, `set_value`, `scroll`
 
 Coordinate clicks are resolved through macOS Accessibility hit-testing and the
@@ -44,7 +45,17 @@ cursor. It shows a short-lived, click-through blue cursor halo at click and
 element-scroll targets so users can see Computer Use activity without losing
 control of their own pointer.
 
-`status`, `request_accessibility`, `find_apps`, and `launch_app` do not require Accessibility access. Inspection and mutation commands do.
+`status`, `request_accessibility`, `request_screen_capture`, `screenshot`,
+`find_apps`, and `launch_app` do not require Accessibility access. Inspection
+and mutation commands do. Screenshot capture instead requires macOS Screen
+Recording permission.
+
+`screenshot` accepts `scope: "window" | "screen"`. Window capture is the
+default and accepts the standard optional app selector (`app`, `pid`, or the
+frontmost application when omitted). Screen capture defaults to the main
+display and accepts an optional positive `displayId`. Both modes return PNG
+base64 plus pixel dimensions, scale factor, logical bounds, and target
+metadata.
 
 `get_app_state` returns compact, line-numbered Accessibility text. Element indexes remain valid only while the target app's UI tree has not changed structurally.
 

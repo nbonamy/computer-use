@@ -33,23 +33,31 @@ private final class LaunchApplicationResult: @unchecked Sendable {
 public final class AccessibilityPilot {
   private let cursorOverlay: ComputerUseCursorOverlay
   private let initialCursorPresenter: () -> Void
+  private let screenCapturer: ScreenCapturing
   private var didPresentInitialCursor = false
 
   public init(cursorOverlay: ComputerUseCursorOverlay = ComputerUseCursorOverlay()) {
     self.cursorOverlay = cursorOverlay
     self.initialCursorPresenter = { cursorOverlay.showAtMainScreenCenter() }
+    self.screenCapturer = MacScreenCapturer()
   }
 
   init(
     cursorOverlay: ComputerUseCursorOverlay = ComputerUseCursorOverlay(),
-    initialCursorPresenter: @escaping () -> Void
+    initialCursorPresenter: @escaping () -> Void,
+    screenCapturer: ScreenCapturing = MacScreenCapturer()
   ) {
     self.cursorOverlay = cursorOverlay
     self.initialCursorPresenter = initialCursorPresenter
+    self.screenCapturer = screenCapturer
   }
 
   public func handle(_ request: PilotRequest) -> PilotResponse {
-    presentInitialCursorIfNeeded()
+    if request.command == "screenshot" || request.arguments["showCursor"]?.boolValue == false {
+      cursorOverlay.hide()
+    } else {
+      presentInitialCursorIfNeeded()
+    }
     switch request.command {
     case "ping":
       return .success(id: request.id, result: .object(["success": .bool(true)]))
@@ -57,6 +65,10 @@ public final class AccessibilityPilot {
       return .success(id: request.id, result: status())
     case "request_accessibility":
       return .success(id: request.id, result: requestAccessibility(arguments: request.arguments))
+    case "request_screen_capture":
+      return .success(id: request.id, result: requestScreenCapture())
+    case "screenshot":
+      return runtimeGuard(id: request.id) { try screenshot(arguments: request.arguments) }
     case "list_apps":
       return .success(id: request.id, result: listApps())
     case "find_apps":
@@ -125,10 +137,42 @@ public final class AccessibilityPilot {
   private func status() -> JSONValue {
     .object([
       "accessibilityTrusted": .bool(AXIsProcessTrusted()),
+      "screenCaptureTrusted": .bool(screenCapturer.isTrusted),
       "platform": .string("macos"),
       "protocol": .string("computer-use-pilot.v1"),
       "success": .bool(true)
     ])
+  }
+
+  private func requestScreenCapture() -> JSONValue {
+    .object([
+      "screenCaptureTrusted": .bool(screenCapturer.requestAccess()),
+      "success": .bool(true)
+    ])
+  }
+
+  private func screenshot(arguments: [String: JSONValue]) throws -> JSONValue {
+    let scope = arguments["scope"]?.stringValue ?? "window"
+    switch scope {
+    case "window":
+      return try screenCapturer.captureWindow(application: runningApplication(arguments: arguments))
+    case "screen":
+      return try screenCapturer.captureScreen(displayID: try displayIdentifierArgument(arguments))
+    default:
+      throw PilotRuntimeError(code: "invalid_request", message: "scope must be window or screen.")
+    }
+  }
+
+  private func displayIdentifierArgument(_ arguments: [String: JSONValue]) throws -> CGDirectDisplayID? {
+    guard let rawDisplayID = arguments["displayId"] else {
+      return nil
+    }
+    guard let value = rawDisplayID.intValue,
+          let displayID = CGDirectDisplayID(exactly: value),
+          displayID > 0 else {
+      throw PilotRuntimeError(code: "invalid_request", message: "displayId must be a positive display identifier.")
+    }
+    return displayID
   }
 
   private func requestAccessibility(arguments: [String: JSONValue]) -> JSONValue {
@@ -612,6 +656,28 @@ public final class AccessibilityPilot {
           code: "app_not_found",
           message: "No running application has pid \(pid). Refresh app state and use its current pid."
         )
+      }
+      return app
+    }
+
+    if let bundleIdentifier = arguments["bundleIdentifier"]?.stringValue {
+      guard let app = NSWorkspace.shared.runningApplications.first(where: {
+        $0.bundleIdentifier == bundleIdentifier && !$0.isTerminated
+      }) else {
+        throw PilotRuntimeError(
+          code: "app_not_found",
+          message: "Could not find running app with bundle identifier \(bundleIdentifier)."
+        )
+      }
+      return app
+    }
+
+    if let appPath = arguments["path"]?.stringValue {
+      let targetPath = URL(fileURLWithPath: appPath).standardizedFileURL.path
+      guard let app = NSWorkspace.shared.runningApplications.first(where: {
+        $0.bundleURL?.standardizedFileURL.path == targetPath && !$0.isTerminated
+      }) else {
+        throw PilotRuntimeError(code: "app_not_found", message: "Could not find running app at \(appPath).")
       }
       return app
     }
@@ -1887,7 +1953,7 @@ public final class AccessibilityPilot {
   }
 }
 
-private struct PilotRuntimeError: Error {
+struct PilotRuntimeError: Error {
   let code: String
   let message: String
 }

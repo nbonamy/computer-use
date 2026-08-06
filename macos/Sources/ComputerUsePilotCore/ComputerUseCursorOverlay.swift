@@ -31,6 +31,10 @@ public final class ComputerUseCursorOverlay: NSObject {
     showClick(at: CGPoint(x: bounds.midX, y: bounds.midY))
   }
 
+  public func hide() {
+    panel?.orderOut(nil)
+  }
+
   @discardableResult
   public func showClick(at point: CGPoint) -> TimeInterval {
     let overlayFrame = screen(containing: point)?.frame ?? NSScreen.main?.frame ?? .zero

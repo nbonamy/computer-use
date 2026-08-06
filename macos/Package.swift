@@ -23,7 +23,9 @@ let package = Package(
       resources: [.process("Resources")],
       linkerSettings: [
         .linkedFramework("ApplicationServices"),
-        .linkedFramework("AppKit")
+        .linkedFramework("AppKit"),
+        .linkedFramework("CoreGraphics"),
+        .linkedFramework("ScreenCaptureKit")
       ]
     ),
     .executableTarget(

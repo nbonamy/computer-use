@@ -33,6 +33,8 @@ commands. Each tool maps to one Pilot method.
 | --- | --- | --- | --- |
 | `computer_use_status` | `status` | Check helper availability and Accessibility trust. | none |
 | `computer_use_request_accessibility` | `request_accessibility` | Ask macOS for Accessibility trust and optionally open Settings. | `prompt?`, `openSettings?` |
+| `computer_use_request_screen_recording` | `request_screen_capture` | Ask macOS for Screen Recording trust. | none |
+| `computer_use_screenshot` | `screenshot` | Capture a target window or an entire display as PNG image content. | `scope?`, app selector, `displayId?` |
 | `computer_use_list_apps` | `list_apps` | List running apps before choosing a target. | none |
 | `computer_use_find_apps` | `find_apps` | Find an installed app that is not running. | `query?`, `bundleIdentifier?`, `maxResults?` |
 | `computer_use_launch_app` | `launch_app` | Start an app. | `bundleIdentifier?`, `path?`, `activate?` |
@@ -86,11 +88,15 @@ write logs or diagnostics to stdout; it is reserved for protocol responses.
 
 Do not expose UI inspection or action tools simply because the app is running.
 
-1. Make `computer_use_status` available first.
-2. If Accessibility is not trusted, expose
+1. Make `computer_use_status` available first. Its result reports both
+   Accessibility and Screen Recording trust.
+2. Screenshot tools may be exposed independently when Screen Recording is
+   trusted; otherwise offer the app-owned permission flow backed by
+   `request_screen_capture`.
+3. If Accessibility is not trusted, expose
    `computer_use_request_accessibility` and keep inspection/action tools
    unavailable.
-3. Once trusted, expose the rest of the functions according to your app's
+4. Once trusted, expose the rest of the functions according to your app's
    user-consent and approval policy.
 
 An app may expose a product-specific bootstrap function that asks the user to

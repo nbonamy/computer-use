@@ -1,7 +1,97 @@
+import AppKit
+import CoreGraphics
 import XCTest
 @testable import ComputerUsePilotCore
 
 final class PilotProtocolTests: XCTestCase {
+  @MainActor
+  func testScreenshotDefaultsToTheTargetWindow() {
+    let capturer = FakeScreenCapturer()
+    let pilot = AccessibilityPilot(initialCursorPresenter: {}, screenCapturer: capturer)
+    let pid = try! XCTUnwrap(NSWorkspace.shared.frontmostApplication).processIdentifier
+
+    let response = pilot.handle(PilotRequest(
+      id: "window-shot",
+      command: "screenshot"
+    ))
+
+    XCTAssertTrue(response.ok)
+    XCTAssertEqual(response.result?.objectValue?["scope"]?.stringValue, "window")
+    XCTAssertEqual(capturer.windowProcessIdentifiers, [pid])
+    XCTAssertTrue(capturer.screenDisplayIdentifiers.isEmpty)
+  }
+
+  @MainActor
+  func testScreenshotCapturesARequestedFullScreen() {
+    let capturer = FakeScreenCapturer()
+    let pilot = AccessibilityPilot(initialCursorPresenter: {}, screenCapturer: capturer)
+
+    let response = pilot.handle(PilotRequest(
+      id: "screen-shot",
+      command: "screenshot",
+      arguments: ["scope": .string("screen"), "displayId": .number(42)]
+    ))
+
+    XCTAssertTrue(response.ok)
+    XCTAssertEqual(response.result?.objectValue?["scope"]?.stringValue, "screen")
+    XCTAssertEqual(capturer.screenDisplayIdentifiers, [42])
+    XCTAssertTrue(capturer.windowProcessIdentifiers.isEmpty)
+  }
+
+  @MainActor
+  func testScreenshotResolvesBundleAndPathSelectorsWithoutFallingBack() throws {
+    let app = try XCTUnwrap(NSWorkspace.shared.runningApplications.first(where: {
+      $0.bundleIdentifier != nil && $0.bundleURL != nil && !$0.isTerminated
+    }))
+    let capturer = FakeScreenCapturer()
+    let pilot = AccessibilityPilot(initialCursorPresenter: {}, screenCapturer: capturer)
+
+    let byBundle = pilot.handle(PilotRequest(
+      id: "bundle-shot",
+      command: "screenshot",
+      arguments: ["bundleIdentifier": .string(try XCTUnwrap(app.bundleIdentifier))]
+    ))
+    let byPath = pilot.handle(PilotRequest(
+      id: "path-shot",
+      command: "screenshot",
+      arguments: ["path": .string(try XCTUnwrap(app.bundleURL).path)]
+    ))
+
+    XCTAssertTrue(byBundle.ok)
+    XCTAssertTrue(byPath.ok)
+    XCTAssertEqual(capturer.windowProcessIdentifiers, [app.processIdentifier, app.processIdentifier])
+  }
+
+  @MainActor
+  func testScreenshotRejectsUnknownScopesAndInvalidDisplayIdentifiers() {
+    let capturer = FakeScreenCapturer()
+    let pilot = AccessibilityPilot(initialCursorPresenter: {}, screenCapturer: capturer)
+
+    for arguments: [String: JSONValue] in [
+      ["scope": .string("desktop")],
+      ["scope": .string("screen"), "displayId": .number(0)]
+    ] {
+      let response = pilot.handle(PilotRequest(id: "invalid-shot", command: "screenshot", arguments: arguments))
+      XCTAssertFalse(response.ok)
+      XCTAssertEqual(response.error?.code, "invalid_request")
+    }
+  }
+
+  @MainActor
+  func testScreenCapturePermissionUsesTheCaptureProvider() {
+    let capturer = FakeScreenCapturer()
+    capturer.isTrusted = false
+    capturer.requestResult = true
+    let pilot = AccessibilityPilot(initialCursorPresenter: {}, screenCapturer: capturer)
+
+    let status = pilot.handle(PilotRequest(id: "status", command: "status"))
+    let requested = pilot.handle(PilotRequest(id: "request", command: "request_screen_capture"))
+
+    XCTAssertEqual(status.result?.objectValue?["screenCaptureTrusted"]?.boolValue, false)
+    XCTAssertEqual(requested.result?.objectValue?["screenCaptureTrusted"]?.boolValue, true)
+    XCTAssertEqual(capturer.requestCount, 1)
+  }
+
   func testCursorAnimationDurationScalesAndStaysWithinHumanMovementBounds() {
     XCTAssertEqual(computerUseCursorAnimationDuration(for: 10), 0.16)
     XCTAssertEqual(computerUseCursorAnimationDuration(for: 700), 0.5)
@@ -17,6 +107,39 @@ final class PilotProtocolTests: XCTestCase {
     _ = pilot.handle(PilotRequest(id: "second", command: "ping"))
 
     XCTAssertEqual(presentationCount, 1)
+  }
+
+  @MainActor
+  func testScreenshotDoesNotPresentTheComputerUseCursor() {
+    var presentationCount = 0
+    let capturer = FakeScreenCapturer()
+    let pilot = AccessibilityPilot(
+      initialCursorPresenter: { presentationCount += 1 },
+      screenCapturer: capturer
+    )
+
+    let response = pilot.handle(PilotRequest(
+      id: "screen-shot",
+      command: "screenshot",
+      arguments: ["scope": .string("screen")]
+    ))
+
+    XCTAssertTrue(response.ok)
+    XCTAssertEqual(presentationCount, 0)
+  }
+
+  @MainActor
+  func testRequestCanSuppressTheComputerUseCursor() {
+    var presentationCount = 0
+    let pilot = AccessibilityPilot(initialCursorPresenter: { presentationCount += 1 })
+
+    _ = pilot.handle(PilotRequest(
+      id: "background-state",
+      command: "get_app_state",
+      arguments: ["showCursor": .bool(false)]
+    ))
+
+    XCTAssertEqual(presentationCount, 0)
   }
 
   func testDecodesRequestWithArguments() throws {
@@ -123,6 +246,31 @@ final class PilotProtocolTests: XCTestCase {
     XCTAssertEqual(response.id, "status-1")
     XCTAssertEqual(response.ok, true)
     XCTAssertNotNil(response.result?.objectValue?["accessibilityTrusted"]?.boolValue)
+    XCTAssertNotNil(response.result?.objectValue?["screenCaptureTrusted"]?.boolValue)
     XCTAssertEqual(response.result?.objectValue?["protocol"]?.stringValue, "computer-use-pilot.v1")
+  }
+}
+
+@MainActor
+private final class FakeScreenCapturer: ScreenCapturing {
+  var isTrusted = true
+  var requestResult = true
+  var requestCount = 0
+  var screenDisplayIdentifiers: [CGDirectDisplayID?] = []
+  var windowProcessIdentifiers: [pid_t] = []
+
+  func requestAccess() -> Bool {
+    requestCount += 1
+    return requestResult
+  }
+
+  func captureScreen(displayID: CGDirectDisplayID?) throws -> JSONValue {
+    screenDisplayIdentifiers.append(displayID)
+    return .object(["scope": .string("screen"), "success": .bool(true)])
+  }
+
+  func captureWindow(application: NSRunningApplication) throws -> JSONValue {
+    windowProcessIdentifiers.append(application.processIdentifier)
+    return .object(["scope": .string("window"), "success": .bool(true)])
   }
 }
