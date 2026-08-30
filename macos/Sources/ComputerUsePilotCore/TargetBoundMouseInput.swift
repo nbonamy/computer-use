@@ -9,7 +9,6 @@ struct TargetBoundMouseInput {
   let isTargetFocused: (pid_t) -> Bool
   let currentPointerLocation: () -> CGPoint
   let postClicks: (CGPoint, Int) -> Void
-  let movePointer: (CGPoint) -> Void
   let restorePointerLocation: (CGPoint) -> Void
 
   func click(at point: CGPoint, clickCount: Int, targetPID: pid_t) throws {
@@ -21,12 +20,6 @@ struct TargetBoundMouseInput {
     postClicks(point, clickCount)
   }
 
-  func move(to point: CGPoint, targetPID: pid_t) throws {
-    guard isTargetFocused(targetPID) else {
-      throw TargetBoundMouseInputError.targetLostFocus
-    }
-    movePointer(point)
-  }
 }
 
 func physicalClickRequested(_ arguments: [String: JSONValue]) -> Bool {
