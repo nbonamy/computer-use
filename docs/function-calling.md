@@ -41,6 +41,7 @@ commands. Each tool maps to one Pilot method.
 | `computer_use_focus_app` | `focus_app` | Bring a running app forward. | `app?`, `bundleIdentifier?`, `pid?` |
 | `computer_use_get_app_state` | `get_app_state` | Inspect one app and return compact, line-numbered UI state. | `app?`, `pid?`, `rootElementIndex?`, traversal options |
 | `computer_use_click` | `click` | Activate a fresh accessibility element or a coordinate target. | app selector plus `element_index`, or `x` and `y` |
+| `computer_use_dismiss` | `dismiss` | Dismiss an active native menu or popover with `AXCancel`. | app selector and optional accessibility scope or semantic selector |
 | `computer_use_type_text` | `type_text` | Type literal text into the focused element. | app selector plus `text` |
 | `computer_use_set_value` | `set_value` | Set `AXValue` on a normal settable element. | app selector, `element_index`, `value` |
 | `computer_use_scroll` | `scroll` | Scroll an element or the current view. | app selector, `element_index?`, direction or deltas |
@@ -113,8 +114,12 @@ screen coordinates:
 2. Use `computer_use_list_apps`, or `computer_use_find_apps` then
    `computer_use_launch_app`, to select the target.
 3. Call `computer_use_get_app_state`.
-4. Select one line's fresh `element_index` and make exactly one action call.
+4. Prefer a semantic selector when available; otherwise select one line's fresh `element_index` and make exactly one action call.
 5. Call `computer_use_get_app_state` again before the next UI decision.
+
+Use the menu-bar accessibility scope to inspect native menus and `dismiss`
+before returning to typing or app content. Neither operation moves the hardware
+pointer.
 
 The compact `text` field in app state is the normal model input. It contains
 line-numbered elements; use the leading number as `element_index` for `click`,

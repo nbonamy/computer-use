@@ -83,6 +83,8 @@ public final class AccessibilityPilot {
       return accessibilityGuard(id: request.id) { try getAppState(arguments: request.arguments) }
     case "click":
       return accessibilityGuard(id: request.id) { try click(arguments: request.arguments) }
+    case "dismiss":
+      return accessibilityGuard(id: request.id) { try dismiss(arguments: request.arguments) }
     case "type_text":
       return accessibilityGuard(id: request.id) { try typeText(arguments: request.arguments) }
     case "set_value":
@@ -395,6 +397,7 @@ public final class AccessibilityPilot {
     let maxDepth = try optionalIntegerArgument(arguments, "maxDepth", minimum: 0)
     let maxNodes = try optionalIntegerArgument(arguments, "maxNodes", minimum: 1)
     let maxTextCharacters = try optionalIntegerArgument(arguments, "maxTextCharacters", minimum: 1)
+    let includeMacChrome = arguments["accessibilityScope"]?.stringValue == "menu_bar"
     let scopedRoot = try scopedAppStateRoot(appRoot: appRoot, arguments: arguments, maxDepth: maxDepth, maxNodes: maxNodes)
     let root = scopedRoot.element
     var remaining = maxNodes
@@ -407,6 +410,7 @@ public final class AccessibilityPilot {
       path: scopedRoot.path,
       depth: 0,
       parentRole: nil,
+      includeMacChrome: includeMacChrome,
       pendingSiblingLabel: &pendingSiblingLabel,
       maxDepth: maxDepth,
       remaining: &remaining,
@@ -474,7 +478,7 @@ public final class AccessibilityPilot {
     let clickCount = max(1, arguments["click_count"]?.intValue ?? 1)
     let physical = physicalClickRequested(arguments)
 
-    if let element = try elementByOptionalIndex(arguments: arguments) {
+    if let element = try actionElement(arguments: arguments) {
       if physical {
         let point = try centerPoint(of: element)
         showComputerUseCursor(at: point)
@@ -525,6 +529,17 @@ public final class AccessibilityPilot {
       "success": .bool(true),
       "x": .number(point.x),
       "y": .number(point.y)
+    ])
+  }
+
+  private func dismiss(arguments: [String: JSONValue]) throws -> JSONValue {
+    let root = try rootElement(arguments: arguments)
+    let target = try actionElement(arguments: arguments) ?? root
+    try performAction(target, action: kAXCancelAction)
+    return .object([
+      "action": .string("cancel"),
+      "success": .bool(true),
+      "target": describeElement(target, path: "target")
     ])
   }
 
@@ -638,24 +653,35 @@ public final class AccessibilityPilot {
   }
 
   private func rootElement(arguments: [String: JSONValue]) throws -> AXUIElement {
+    let appRoot: AXUIElement
     if let pid = try processIdentifierArgument(arguments) {
       guard NSWorkspace.shared.runningApplications.contains(where: { $0.processIdentifier == pid && !$0.isTerminated }) else {
         throw PilotRuntimeError(code: "app_not_found", message: "No running application has pid \(pid). Refresh app state and use its current pid.")
       }
-      return preparedRootElement(processIdentifier: pid)
-    }
-
-    if let appName = arguments["app"]?.stringValue {
+      appRoot = preparedRootElement(processIdentifier: pid)
+    } else if let appName = arguments["app"]?.stringValue {
       let app = NSWorkspace.shared.runningApplications.first {
         $0.localizedName == appName || $0.bundleIdentifier == appName
       }
       guard let app else {
         throw PilotRuntimeError(code: "app_not_found", message: "Could not find running app \(appName).")
       }
-      return preparedRootElement(processIdentifier: app.processIdentifier)
+      appRoot = preparedRootElement(processIdentifier: app.processIdentifier)
+    } else {
+      appRoot = preparedRootElement(processIdentifier: try frontmostApplication().processIdentifier)
     }
 
-    return preparedRootElement(processIdentifier: try frontmostApplication().processIdentifier)
+    switch arguments["accessibilityScope"]?.stringValue ?? "application" {
+    case "application":
+      return appRoot
+    case "menu_bar":
+      guard let menuBar = try? copyElementAttribute(appRoot, kAXMenuBarAttribute as String) else {
+        throw PilotRuntimeError(code: "element_not_found", message: "The target application has no accessible menu bar.")
+      }
+      return menuBar
+    default:
+      throw PilotRuntimeError(code: "invalid_request", message: "accessibilityScope must be application or menu_bar.")
+    }
   }
 
   private func preparedRootElement(processIdentifier: pid_t) -> AXUIElement {
@@ -914,6 +940,16 @@ public final class AccessibilityPilot {
     return try elementAtIndex(root: root, targetIndex: index, maxDepth: maxDepth, maxNodes: maxNodes)
   }
 
+  private func actionElement(arguments: [String: JSONValue]) throws -> AXUIElement? {
+    if let element = try elementByOptionalIndex(arguments: arguments) {
+      return element
+    }
+    guard arguments["selector"]?.objectValue != nil else {
+      return nil
+    }
+    return try resolveTarget(root: rootElement(arguments: arguments), arguments: arguments)
+  }
+
   private func elementByRequiredIndexOrPath(arguments: [String: JSONValue]) throws -> AXUIElement {
     let root = try rootElement(arguments: arguments)
     if let element = try elementByOptionalIndex(arguments: arguments, root: root) {
@@ -1119,6 +1155,7 @@ public final class AccessibilityPilot {
     path: String,
     depth: Int,
     parentRole: String?,
+    includeMacChrome: Bool,
     pendingSiblingLabel: inout String?,
     maxDepth: Int?,
     remaining: inout Int?,
@@ -1143,7 +1180,7 @@ public final class AccessibilityPilot {
     } else {
       applyPendingSiblingLabel(&node, role: role, pendingSiblingLabel: &pendingSiblingLabel)
     }
-    if shouldRenderStateLine(node, depth: depth, parentRole: parentRole) {
+    if shouldRenderStateLine(node, depth: depth, parentRole: parentRole, includeMacChrome: includeMacChrome) {
       treeLines.append("\(stateLineIndent(depth))\(elementLine(node))")
     }
     let elementSummary = compactElementSummary(node)
@@ -1165,6 +1202,7 @@ public final class AccessibilityPilot {
         path: "\(path).children[\(childIndex)]",
         depth: depth + 1,
         parentRole: role,
+        includeMacChrome: includeMacChrome,
         pendingSiblingLabel: &pendingSiblingLabel,
         maxDepth: maxDepth,
         remaining: &remaining,
@@ -1277,7 +1315,12 @@ public final class AccessibilityPilot {
     ""
   }
 
-  private func shouldRenderStateLine(_ element: [String: JSONValue], depth: Int, parentRole: String?) -> Bool {
+  private func shouldRenderStateLine(
+    _ element: [String: JSONValue],
+    depth: Int,
+    parentRole: String?,
+    includeMacChrome: Bool
+  ) -> Bool {
     let role = humanRole(element["role"]?.stringValue)
     if element["siblingLabelCaptured"]?.boolValue == true {
       return false
@@ -1288,7 +1331,7 @@ public final class AccessibilityPilot {
     if role == "cell" && parentRole == "row" {
       return false
     }
-    if shouldHideCompactStateLine(element, role: role) {
+    if shouldHideCompactStateLine(element, role: role, includeMacChrome: includeMacChrome) {
       return false
     }
     if depth <= 2 {
@@ -1314,8 +1357,12 @@ public final class AccessibilityPilot {
     return false
   }
 
-  private func shouldHideCompactStateLine(_ element: [String: JSONValue], role: String) -> Bool {
-    if roleIsMacChrome(role) {
+  private func shouldHideCompactStateLine(
+    _ element: [String: JSONValue],
+    role: String,
+    includeMacChrome: Bool
+  ) -> Bool {
+    if shouldHideMacChromeRole(role, includeMacChrome: includeMacChrome) {
       return true
     }
     if roleIsListItem(role) && !hasAnyTextAttribute(element) && element["selected"]?.boolValue != true {
@@ -1591,8 +1638,9 @@ public final class AccessibilityPilot {
     return false
   }
 
-  private func roleIsMacChrome(_ role: String) -> Bool {
-    role == "menu bar" ||
+  func shouldHideMacChromeRole(_ role: String, includeMacChrome: Bool) -> Bool {
+    !includeMacChrome && (
+      role == "menu bar" ||
       role == "menu" ||
       role == "menu bar item" ||
       role == "menu item" ||
@@ -1600,6 +1648,7 @@ public final class AccessibilityPilot {
       role == "splitter" ||
       role == "toolbar" ||
       role == "value indicator"
+    )
   }
 
   private func roleIsReadableText(_ role: String) -> Bool {

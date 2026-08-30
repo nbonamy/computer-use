@@ -99,6 +99,15 @@ final class PilotProtocolTests: XCTestCase {
   }
 
   @MainActor
+  func testMenuBarScopeExposesNormallyHiddenMacChromeRoles() {
+    let pilot = AccessibilityPilot(initialCursorPresenter: {})
+
+    XCTAssertTrue(pilot.shouldHideMacChromeRole("menu bar item", includeMacChrome: false))
+    XCTAssertFalse(pilot.shouldHideMacChromeRole("menu bar item", includeMacChrome: true))
+    XCTAssertFalse(pilot.shouldHideMacChromeRole("button", includeMacChrome: false))
+  }
+
+  @MainActor
   func testPilotPresentsTheInitialCursorOnlyOnTheFirstRequest() {
     var presentationCount = 0
     let pilot = AccessibilityPilot(initialCursorPresenter: { presentationCount += 1 })

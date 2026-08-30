@@ -36,7 +36,7 @@ The public command surface is:
 - `status`, `request_accessibility`, `request_screen_capture`
 - `list_apps`, `find_apps`, `launch_app`, `focus_app`
 - `screenshot`
-- `get_app_state`, `click`, `type_text`, `set_value`, `scroll`
+- `get_app_state`, `click`, `dismiss`, `type_text`, `set_value`, `scroll`
 
 Clicks use macOS Accessibility actions by default. Consumers may pass
 `physical: true` to synthesize a real foreground mouse click for a visible
