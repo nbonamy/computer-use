@@ -83,6 +83,8 @@ public final class AccessibilityPilot {
       return accessibilityGuard(id: request.id) { try getAppState(arguments: request.arguments) }
     case "click":
       return accessibilityGuard(id: request.id) { try click(arguments: request.arguments) }
+    case "move":
+      return accessibilityGuard(id: request.id) { try move(arguments: request.arguments) }
     case "type_text":
       return accessibilityGuard(id: request.id) { try typeText(arguments: request.arguments) }
     case "set_value":
@@ -522,6 +524,27 @@ public final class AccessibilityPilot {
     return .object([
       "click_count": .number(Double(clickCount)),
       "method": .string("\(method)_at_coordinate"),
+      "success": .bool(true),
+      "x": .number(point.x),
+      "y": .number(point.y)
+    ])
+  }
+
+  private func move(arguments: [String: JSONValue]) throws -> JSONValue {
+    try activateAppIfRequested(arguments: arguments)
+    let point: CGPoint
+    if let element = try elementByOptionalIndex(arguments: arguments) {
+      point = try centerPoint(of: element)
+    } else {
+      point = try coordinatePoint(arguments: arguments)
+    }
+    showComputerUseCursor(at: point)
+    try moveMouse(
+      to: point,
+      targetPID: try runningApplication(arguments: arguments).processIdentifier
+    )
+    return .object([
+      "method": .string("cg_mouse_move"),
       "success": .bool(true),
       "x": .number(point.x),
       "y": .number(point.y)
@@ -1799,12 +1822,7 @@ public final class AccessibilityPilot {
   }
 
   private func postMouseClick(at point: CGPoint, clickCount: Int, targetPID: pid_t) throws {
-    let input = TargetBoundMouseInput(
-      isTargetFocused: { targetPID in
-        NSWorkspace.shared.frontmostApplication?.processIdentifier == targetPID
-      },
-      postClicks: postMouseEvents
-    )
+    let input = targetBoundMouseInput()
     do {
       try input.click(at: point, clickCount: clickCount, targetPID: targetPID)
     } catch TargetBoundMouseInputError.targetLostFocus {
@@ -1813,6 +1831,45 @@ public final class AccessibilityPilot {
         message: "Unable to click because the requested app no longer owns focus."
       )
     }
+  }
+
+  private func moveMouse(to point: CGPoint, targetPID: pid_t) throws {
+    let input = targetBoundMouseInput()
+    do {
+      try input.move(to: point, targetPID: targetPID)
+    } catch TargetBoundMouseInputError.targetLostFocus {
+      throw PilotRuntimeError(
+        code: "action_unavailable",
+        message: "Unable to move because the requested app no longer owns focus."
+      )
+    }
+  }
+
+  private func targetBoundMouseInput() -> TargetBoundMouseInput {
+    TargetBoundMouseInput(
+      isTargetFocused: { targetPID in
+        NSWorkspace.shared.frontmostApplication?.processIdentifier == targetPID
+      },
+      currentPointerLocation: {
+        CGEvent(source: nil)?.location ?? .zero
+      },
+      postClicks: postMouseEvents,
+      movePointer: postMouseMove,
+      restorePointerLocation: { point in
+        CGWarpMouseCursorPosition(point)
+      }
+    )
+  }
+
+  private func postMouseMove(to point: CGPoint) {
+    let source = CGEventSource(stateID: .hidSystemState)
+    let event = CGEvent(
+      mouseEventSource: source,
+      mouseType: .mouseMoved,
+      mouseCursorPosition: point,
+      mouseButton: .left
+    )
+    event?.post(tap: .cghidEventTap)
   }
 
   private func postMouseEvents(at point: CGPoint, clickCount: Int) {
