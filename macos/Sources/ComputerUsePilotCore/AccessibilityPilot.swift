@@ -31,31 +31,33 @@ private final class LaunchApplicationResult: @unchecked Sendable {
 
 @MainActor
 public final class AccessibilityPilot {
-  private let cursorOverlay: ComputerUseCursorOverlay
+  private let cursorOverlay: any ComputerUseCursorPresenting
   private let initialCursorPresenter: () -> Void
   private let screenCapturer: ScreenCapturing
+  private let targetAccessibilitySupport: TargetAccessibilitySupport
   private var didPresentInitialCursor = false
 
   public init(cursorOverlay: ComputerUseCursorOverlay = ComputerUseCursorOverlay()) {
     self.cursorOverlay = cursorOverlay
     self.initialCursorPresenter = { cursorOverlay.showAtMainScreenCenter() }
     self.screenCapturer = MacScreenCapturer()
+    self.targetAccessibilitySupport = TargetAccessibilitySupport()
   }
 
   init(
-    cursorOverlay: ComputerUseCursorOverlay = ComputerUseCursorOverlay(),
+    cursorOverlay: any ComputerUseCursorPresenting = ComputerUseCursorOverlay(),
     initialCursorPresenter: @escaping () -> Void,
-    screenCapturer: ScreenCapturing = MacScreenCapturer()
+    screenCapturer: ScreenCapturing = MacScreenCapturer(),
+    targetAccessibilitySupport: TargetAccessibilitySupport = TargetAccessibilitySupport()
   ) {
     self.cursorOverlay = cursorOverlay
     self.initialCursorPresenter = initialCursorPresenter
     self.screenCapturer = screenCapturer
+    self.targetAccessibilitySupport = targetAccessibilitySupport
   }
 
   public func handle(_ request: PilotRequest) -> PilotResponse {
-    if request.command == "screenshot" || request.arguments["showCursor"]?.boolValue == false {
-      cursorOverlay.hide()
-    } else {
+    if request.command != "screenshot" && request.arguments["showCursor"]?.boolValue != false {
       presentInitialCursorIfNeeded()
     }
     switch request.command {
@@ -152,6 +154,8 @@ public final class AccessibilityPilot {
   }
 
   private func screenshot(arguments: [String: JSONValue]) throws -> JSONValue {
+    let shouldRestoreCursor = cursorOverlay.hideForCapture()
+    defer { cursorOverlay.restoreAfterCapture(shouldRestoreCursor) }
     let scope = arguments["scope"]?.stringValue ?? "window"
     switch scope {
     case "window":
@@ -467,12 +471,26 @@ public final class AccessibilityPilot {
 
   private func click(arguments: [String: JSONValue]) throws -> JSONValue {
     try activateAppIfRequested(arguments: arguments)
-
     let clickCount = max(1, arguments["click_count"]?.intValue ?? 1)
+    let physical = physicalClickRequested(arguments)
 
     if let element = try elementByOptionalIndex(arguments: arguments) {
-      let point = try? centerPoint(of: element)
-      if let point {
+      if physical {
+        let point = try centerPoint(of: element)
+        showComputerUseCursor(at: point)
+        try postMouseClick(
+          at: point,
+          clickCount: clickCount,
+          targetPID: try runningApplication(arguments: arguments).processIdentifier
+        )
+        return .object([
+          "click_count": .number(Double(clickCount)),
+          "method": .string("cg_mouse_click"),
+          "success": .bool(true),
+          "target": describeElement(element, path: "target")
+        ])
+      }
+      if let point = try? centerPoint(of: element) {
         showComputerUseCursor(at: point)
       }
       let method = try activateElement(element, clickCount: clickCount)
@@ -489,7 +507,17 @@ public final class AccessibilityPilot {
     // not resolve to an actionable Accessibility element. This keeps the
     // software cursor useful for previews and makes failed actions observable.
     showComputerUseCursor(at: point)
-    let method = try activateElement(at: point, clickCount: clickCount)
+    let method: String
+    if physical {
+      try postMouseClick(
+        at: point,
+        clickCount: clickCount,
+        targetPID: try runningApplication(arguments: arguments).processIdentifier
+      )
+      method = "cg_mouse_click"
+    } else {
+      method = try activateElement(at: point, clickCount: clickCount)
+    }
 
     return .object([
       "click_count": .number(Double(clickCount)),
@@ -614,7 +642,7 @@ public final class AccessibilityPilot {
       guard NSWorkspace.shared.runningApplications.contains(where: { $0.processIdentifier == pid && !$0.isTerminated }) else {
         throw PilotRuntimeError(code: "app_not_found", message: "No running application has pid \(pid). Refresh app state and use its current pid.")
       }
-      return AXUIElementCreateApplication(pid)
+      return preparedRootElement(processIdentifier: pid)
     }
 
     if let appName = arguments["app"]?.stringValue {
@@ -624,10 +652,15 @@ public final class AccessibilityPilot {
       guard let app else {
         throw PilotRuntimeError(code: "app_not_found", message: "Could not find running app \(appName).")
       }
-      return AXUIElementCreateApplication(app.processIdentifier)
+      return preparedRootElement(processIdentifier: app.processIdentifier)
     }
 
-    return AXUIElementCreateApplication(try frontmostApplication().processIdentifier)
+    return preparedRootElement(processIdentifier: try frontmostApplication().processIdentifier)
+  }
+
+  private func preparedRootElement(processIdentifier: pid_t) -> AXUIElement {
+    _ = targetAccessibilitySupport.prepare(processIdentifier: processIdentifier)
+    return AXUIElementCreateApplication(processIdentifier)
   }
 
   private func scopedAppStateRoot(
@@ -801,10 +834,14 @@ public final class AccessibilityPilot {
   }
 
   private func activateAppIfRequested(arguments: [String: JSONValue]) throws {
-    guard arguments["app"] != nil || arguments["pid"] != nil else {
+    guard arguments["app"] != nil ||
+      arguments["bundleIdentifier"] != nil ||
+      arguments["path"] != nil ||
+      arguments["pid"] != nil else {
       return
     }
     let app = try runningApplication(arguments: arguments)
+    _ = targetAccessibilitySupport.prepare(processIdentifier: app.processIdentifier)
     app.activate(options: [.activateAllWindows])
     waitForActivation(app)
   }
@@ -1759,6 +1796,49 @@ public final class AccessibilityPilot {
     // prevents a following command from interrupting the movement before the
     // cursor reaches the point where the accessibility action occurs.
     RunLoop.main.run(until: Date(timeIntervalSinceNow: duration))
+  }
+
+  private func postMouseClick(at point: CGPoint, clickCount: Int, targetPID: pid_t) throws {
+    let input = TargetBoundMouseInput(
+      isTargetFocused: { targetPID in
+        NSWorkspace.shared.frontmostApplication?.processIdentifier == targetPID
+      },
+      postClicks: postMouseEvents
+    )
+    do {
+      try input.click(at: point, clickCount: clickCount, targetPID: targetPID)
+    } catch TargetBoundMouseInputError.targetLostFocus {
+      throw PilotRuntimeError(
+        code: "action_unavailable",
+        message: "Unable to click because the requested app no longer owns focus."
+      )
+    }
+  }
+
+  private func postMouseEvents(at point: CGPoint, clickCount: Int) {
+    let source = CGEventSource(stateID: .hidSystemState)
+    for clickIndex in 1...clickCount {
+      let down = CGEvent(
+        mouseEventSource: source,
+        mouseType: .leftMouseDown,
+        mouseCursorPosition: point,
+        mouseButton: .left
+      )
+      let up = CGEvent(
+        mouseEventSource: source,
+        mouseType: .leftMouseUp,
+        mouseCursorPosition: point,
+        mouseButton: .left
+      )
+      down?.setIntegerValueField(.mouseEventClickState, value: Int64(clickIndex))
+      up?.setIntegerValueField(.mouseEventClickState, value: Int64(clickIndex))
+      down?.post(tap: .cghidEventTap)
+      usleep(20_000)
+      up?.post(tap: .cghidEventTap)
+      if clickIndex < clickCount {
+        usleep(80_000)
+      }
+    }
   }
 
   private func postKeyboardText(_ text: String, targetPID: pid_t) throws {

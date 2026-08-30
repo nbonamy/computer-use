@@ -38,12 +38,17 @@ The public command surface is:
 - `screenshot`
 - `get_app_state`, `click`, `type_text`, `set_value`, `scroll`
 
-Coordinate clicks are resolved through macOS Accessibility hit-testing and the
-nearest pressable accessible ancestor. The helper refuses a raw physical click
-when no accessible target exists, because that would move the user's hardware
-cursor. It shows a short-lived, click-through blue cursor halo at click and
-element-scroll targets so users can see Computer Use activity without losing
-control of their own pointer.
+Clicks use macOS Accessibility actions by default. Consumers may pass
+`physical: true` to synthesize a real foreground mouse click for a visible
+control, such as an Electron/web control that accepts `AXPress` without acting.
+Physical clicks require the target app to remain frontmost and unobstructed.
+
+The helper shows a click-through blue cursor halo so users can see Computer Use
+activity. The halo itself does not move the hardware pointer; an opted-in
+physical click does. The halo lives for the helper process session. Consumers
+own the inactivity timeout and end the session by terminating the helper.
+Screenshots temporarily hide an existing halo during capture and restore it
+afterward without triggering a new halo.
 
 `status`, `request_accessibility`, `request_screen_capture`, `screenshot`,
 `find_apps`, and `launch_app` do not require Accessibility access. Inspection

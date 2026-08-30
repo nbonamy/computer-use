@@ -7,11 +7,19 @@ func computerUseCursorAnimationDuration(for distance: CGFloat) -> TimeInterval {
   min(0.55, max(0.16, TimeInterval(distance / 1_400)))
 }
 
+@MainActor
+protocol ComputerUseCursorPresenting: AnyObject {
+  func showAtMainScreenCenter()
+  func hideForCapture() -> Bool
+  func restoreAfterCapture(_ shouldRestore: Bool)
+  func showClick(at point: CGPoint) -> TimeInterval
+}
+
 /// A visible, click-through marker for actions injected by the Computer Use
 /// helper. This is deliberately an overlay rather than a macOS cursor: macOS
 /// has one hardware cursor and moving it would interfere with the user.
 @MainActor
-public final class ComputerUseCursorOverlay: NSObject {
+public final class ComputerUseCursorOverlay: NSObject, ComputerUseCursorPresenting {
   private var canvasView: ComputerUseCursorCanvasView?
   private var panel: NSPanel?
 
@@ -31,8 +39,20 @@ public final class ComputerUseCursorOverlay: NSObject {
     showClick(at: CGPoint(x: bounds.midX, y: bounds.midY))
   }
 
-  public func hide() {
+  func hideForCapture() -> Bool {
+    guard panel?.isVisible == true else {
+      return false
+    }
     panel?.orderOut(nil)
+    return true
+  }
+
+  func restoreAfterCapture(_ shouldRestore: Bool) {
+    guard shouldRestore else {
+      return
+    }
+    panel?.orderFrontRegardless()
+    CATransaction.flush()
   }
 
   @discardableResult

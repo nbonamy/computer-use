@@ -129,6 +129,46 @@ final class PilotProtocolTests: XCTestCase {
   }
 
   @MainActor
+  func testScreenshotTemporarilyHidesAndRestoresAnExistingCursor() {
+    var events: [String] = []
+    let cursor = FakeCursorOverlay(events: { events.append($0) })
+    let capturer = FakeScreenCapturer(onCapture: { events.append("capture") })
+    let pilot = AccessibilityPilot(
+      cursorOverlay: cursor,
+      initialCursorPresenter: { cursor.showAtMainScreenCenter() },
+      screenCapturer: capturer
+    )
+
+    _ = pilot.handle(PilotRequest(id: "show", command: "ping"))
+    _ = pilot.handle(PilotRequest(
+      id: "screen-shot",
+      command: "screenshot",
+      arguments: ["scope": .string("screen")]
+    ))
+
+    XCTAssertEqual(events, ["show", "hide-for-capture", "capture", "restore-after-capture"])
+  }
+
+  @MainActor
+  func testCursorlessRequestDoesNotHideAnExistingCursor() {
+    var events: [String] = []
+    let cursor = FakeCursorOverlay(events: { events.append($0) })
+    let pilot = AccessibilityPilot(
+      cursorOverlay: cursor,
+      initialCursorPresenter: { cursor.showAtMainScreenCenter() }
+    )
+
+    _ = pilot.handle(PilotRequest(id: "show", command: "ping"))
+    _ = pilot.handle(PilotRequest(
+      id: "background-status",
+      command: "status",
+      arguments: ["showCursor": .bool(false)]
+    ))
+
+    XCTAssertEqual(events, ["show"])
+  }
+
+  @MainActor
   func testRequestCanSuppressTheComputerUseCursor() {
     var presentationCount = 0
     let pilot = AccessibilityPilot(initialCursorPresenter: { presentationCount += 1 })
@@ -258,6 +298,11 @@ private final class FakeScreenCapturer: ScreenCapturing {
   var requestCount = 0
   var screenDisplayIdentifiers: [CGDirectDisplayID?] = []
   var windowProcessIdentifiers: [pid_t] = []
+  private let onCapture: () -> Void
+
+  init(onCapture: @escaping () -> Void = {}) {
+    self.onCapture = onCapture
+  }
 
   func requestAccess() -> Bool {
     requestCount += 1
@@ -265,12 +310,42 @@ private final class FakeScreenCapturer: ScreenCapturing {
   }
 
   func captureScreen(displayID: CGDirectDisplayID?) throws -> JSONValue {
+    onCapture()
     screenDisplayIdentifiers.append(displayID)
     return .object(["scope": .string("screen"), "success": .bool(true)])
   }
 
   func captureWindow(application: NSRunningApplication) throws -> JSONValue {
+    onCapture()
     windowProcessIdentifiers.append(application.processIdentifier)
     return .object(["scope": .string("window"), "success": .bool(true)])
+  }
+}
+
+@MainActor
+private final class FakeCursorOverlay: ComputerUseCursorPresenting {
+  private let events: (String) -> Void
+
+  init(events: @escaping (String) -> Void) {
+    self.events = events
+  }
+
+  func showAtMainScreenCenter() {
+    events("show")
+  }
+
+  func hideForCapture() -> Bool {
+    events("hide-for-capture")
+    return true
+  }
+
+  func restoreAfterCapture(_ shouldRestore: Bool) {
+    if shouldRestore {
+      events("restore-after-capture")
+    }
+  }
+
+  func showClick(at _: CGPoint) -> TimeInterval {
+    0
   }
 }
