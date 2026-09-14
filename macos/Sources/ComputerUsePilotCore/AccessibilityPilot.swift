@@ -35,6 +35,11 @@ public final class AccessibilityPilot {
   private let initialCursorPresenter: () -> Void
   private let screenCapturer: ScreenCapturing
   private let targetAccessibilitySupport: TargetAccessibilitySupport
+  private let stateHistory = AccessibilityStateHistory()
+  private var elementBuckets: [CFHashCode: [(index: Int, element: AXUIElement)]] = [:]
+  private var latestObservedElementIDsByPID: [pid_t: Set<Int>] = [:]
+  private var nextElementIndex = 0
+  private var pendingSettleAtByPID: [pid_t: Date] = [:]
   private var didPresentInitialCursor = false
 
   public init(cursorOverlay: ComputerUseCursorOverlay = ComputerUseCursorOverlay()) {
@@ -82,21 +87,25 @@ public final class AccessibilityPilot {
     case "get_app_state":
       return accessibilityGuard(id: request.id) { try getAppState(arguments: request.arguments) }
     case "click":
-      return accessibilityGuard(id: request.id) { try click(arguments: request.arguments) }
+      return actionGuard(id: request.id, arguments: request.arguments) { try click(arguments: request.arguments) }
     case "dismiss":
-      return accessibilityGuard(id: request.id) { try dismiss(arguments: request.arguments) }
+      return actionGuard(id: request.id, arguments: request.arguments) { try dismiss(arguments: request.arguments) }
     case "type_text":
-      return accessibilityGuard(id: request.id) { try typeText(arguments: request.arguments) }
+      return actionGuard(id: request.id, arguments: request.arguments) { try typeText(arguments: request.arguments) }
+    case "press_key":
+      return actionGuard(id: request.id, arguments: request.arguments) { try pressKey(arguments: request.arguments) }
+    case "drag":
+      return actionGuard(id: request.id, arguments: request.arguments) { try drag(arguments: request.arguments) }
+    case "perform_secondary_action":
+      return actionGuard(id: request.id, arguments: request.arguments) { try performSecondaryAction(arguments: request.arguments) }
+    case "paste":
+      return actionGuard(id: request.id, arguments: request.arguments) { try paste(arguments: request.arguments) }
+    case "select_text":
+      return actionGuard(id: request.id, arguments: request.arguments) { try selectText(arguments: request.arguments) }
     case "set_value":
-      return accessibilityGuard(id: request.id) { try setValue(arguments: request.arguments) }
+      return actionGuard(id: request.id, arguments: request.arguments) { try setValue(arguments: request.arguments) }
     case "scroll":
-      return accessibilityGuard(id: request.id) { try scroll(arguments: request.arguments) }
-    case "focused":
-      return accessibilityGuard(id: request.id) { try focused() }
-    case "snapshot":
-      return accessibilityGuard(id: request.id) { try snapshot(arguments: request.arguments) }
-    case "perform":
-      return accessibilityGuard(id: request.id) { try perform(arguments: request.arguments) }
+      return actionGuard(id: request.id, arguments: request.arguments) { try scroll(arguments: request.arguments) }
     default:
       return .failure(id: request.id, code: "unknown_command", message: "Unknown command \(request.command).")
     }
@@ -138,12 +147,26 @@ public final class AccessibilityPilot {
     }
   }
 
+  private func actionGuard(
+    id: String?,
+    arguments: [String: JSONValue],
+    operation: () throws -> JSONValue
+  ) -> PilotResponse {
+    accessibilityGuard(id: id) {
+      let result = try operation()
+      if let app = try? runningApplication(arguments: arguments) {
+        pendingSettleAtByPID[app.processIdentifier] = Date()
+      }
+      return result
+    }
+  }
+
   private func status() -> JSONValue {
     .object([
       "accessibilityTrusted": .bool(AXIsProcessTrusted()),
       "screenCaptureTrusted": .bool(screenCapturer.isTrusted),
       "platform": .string("macos"),
-      "protocol": .string("computer-use-pilot.v1"),
+      "version": .string("2.0.0"),
       "success": .bool(true)
     ])
   }
@@ -326,7 +349,7 @@ public final class AccessibilityPilot {
         ])
       }
       let app = try runningApplication(arguments: arguments)
-      let activated = app.activate(options: [.activateAllWindows])
+      let activated = activate(app)
       waitForActivation(app)
       return .object([
         "activated": .bool(activated),
@@ -353,44 +376,10 @@ public final class AccessibilityPilot {
     }
   }
 
-  private func focused() throws -> JSONValue {
-    let app = try frontmostApplication()
-    let focusedApp = AXUIElementCreateApplication(app.processIdentifier)
-    let pid = app.processIdentifier
-    let focusedWindow = try? copyElementAttribute(focusedApp, kAXFocusedWindowAttribute)
-
-    var result: [String: JSONValue] = [
-      "app": .object([
-        "bundleIdentifier": .from(app.bundleIdentifier),
-        "localizedName": .from(app.localizedName),
-        "pid": .number(Double(pid))
-      ]),
-      "success": .bool(true)
-    ]
-
-    if let focusedWindow {
-      result["window"] = describeElement(focusedWindow, path: "focused.window")
-    }
-
-    return .object(result)
-  }
-
-  private func snapshot(arguments: [String: JSONValue]) throws -> JSONValue {
-    let root = try rootElement(arguments: arguments)
-    let maxDepth = try optionalIntegerArgument(arguments, "maxDepth", minimum: 0)
-    let maxNodes = try optionalIntegerArgument(arguments, "maxNodes", minimum: 1)
-    var remaining = maxNodes
-    let tree = snapshotElement(root, path: "root", depth: 0, maxDepth: maxDepth, remaining: &remaining)
-    return .object([
-      "root": tree,
-      "success": .bool(true),
-      "truncated": .bool(isTraversalTruncated(remaining))
-    ])
-  }
-
   private func getAppState(arguments: [String: JSONValue]) throws -> JSONValue {
-    let appRoot = try rootElement(arguments: arguments)
     let app = try runningApplication(arguments: arguments)
+    settleBeforeObservation(app: app)
+    let appRoot = try rootElement(arguments: arguments)
     let includeElements = arguments["includeElements"]?.boolValue ?? false
     let includeTree = arguments["includeTree"]?.boolValue ?? false
     let includeDebug = arguments["includeDebug"]?.boolValue ?? false
@@ -401,41 +390,66 @@ public final class AccessibilityPilot {
     let scopedRoot = try scopedAppStateRoot(appRoot: appRoot, arguments: arguments, maxDepth: maxDepth, maxNodes: maxNodes)
     let root = scopedRoot.element
     var remaining = maxNodes
-    var nextIndex = scopedRoot.index
+    var visitedCount = 0
     var elements: [JSONValue] = []
-    var treeLines: [String] = []
+    var stateRows: [AccessibilityStateRow] = []
+    var observedElementIDs: Set<Int> = []
     var pendingSiblingLabel: String?
     let tree = indexedSnapshotElement(
       root,
       path: scopedRoot.path,
       depth: 0,
+      parentElementIndex: nil,
+      siblingIndex: 0,
       parentRole: nil,
       includeMacChrome: includeMacChrome,
       pendingSiblingLabel: &pendingSiblingLabel,
       maxDepth: maxDepth,
       remaining: &remaining,
-      nextIndex: &nextIndex,
+      visitedCount: &visitedCount,
       elements: &elements,
-      treeLines: &treeLines
+      stateRows: &stateRows,
+      observedElementIDs: &observedElementIDs
     )
+    latestObservedElementIDsByPID[app.processIdentifier] = observedElementIDs
     let focusedElement = elements.first { element in
       element.objectValue?["focused"]?.boolValue == true
     } ?? .null
     let focusedElementText = focusedElement.objectValue.map { "Focused element: \(elementLine($0))" }
-    let stateText = appStateText(
-      app: app,
-      root: appRoot,
-      treeLines: treeLines,
-      focusedElementText: focusedElementText,
-      truncated: isTraversalTruncated(remaining)
+    let header = appStateHeader(app: app, root: appRoot)
+    var footer: [String] = []
+    if isTraversalTruncated(remaining) {
+      footer.append("Tree truncated. Re-run with a higher maxNodes value if needed.")
+    }
+    if let focusedElementText {
+      footer.append(focusedElementText)
+    }
+    let historyKey = [
+      String(app.processIdentifier),
+      arguments["accessibilityScope"]?.stringValue ?? "application",
+      arguments["rootElementIndex"]?.stringValue ?? "root",
+      maxDepth.map(String.init) ?? "unbounded",
+      maxNodes.map(String.init) ?? "unbounded"
+    ].joined(separator: ":")
+    let stateRender = stateHistory.render(
+      key: historyKey,
+      header: header,
+      rows: stateRows,
+      footer: footer,
+      disableDiff: arguments["disableDiff"]?.boolValue == true,
+      maxTextCharacters: maxTextCharacters
     )
-    let text = truncatedText(stateText, maxCharacters: maxTextCharacters)
+    var text = truncatedText(stateRender.text, maxCharacters: maxTextCharacters)
+    let diffWasTruncated = text.truncated && stateRender.kind == "diff"
+    if diffWasTruncated {
+      text = truncatedText(stateRender.fullText, maxCharacters: maxTextCharacters)
+    }
     let metrics: [String: JSONValue] = [
       "exposedElementCount": .number(Double(elements.count)),
-      "lineCount": .number(Double(stateText.split(separator: "\n", omittingEmptySubsequences: false).count)),
+      "lineCount": .number(Double(stateRender.fullText.split(separator: "\n", omittingEmptySubsequences: false).count)),
       "textCharacters": .number(Double(text.value.count)),
-      "textCharactersBeforeTruncation": .number(Double(stateText.count)),
-      "visitedNodeCount": .number(Double(nextIndex - scopedRoot.index))
+      "textCharactersBeforeTruncation": .number(Double(stateRender.text.count)),
+      "visitedNodeCount": .number(Double(visitedCount))
     ]
 
     var result: [String: JSONValue] = [
@@ -445,9 +459,31 @@ public final class AccessibilityPilot {
         "pid": .number(Double(app.processIdentifier))
       ]),
       "success": .bool(true),
+      "stateKind": .string(diffWasTruncated ? "full" : stateRender.kind),
+      "stateRevision": .number(Double(stateRender.revision)),
       "text": .string(text.value),
       "window": windowDescription(for: appRoot)
     ]
+    if let baseRevision = stateRender.baseRevision, !diffWasTruncated {
+      result["baseRevision"] = .number(Double(baseRevision))
+    }
+    if arguments["includeContextSnapshot"]?.boolValue == true {
+      result["contextSnapshot"] = .object(["text": .string(stateRender.fullText)])
+    }
+    if arguments["includeScreenshot"]?.boolValue != false {
+      do {
+        result["screenshot"] = try screenshot(arguments: [
+          "pid": .number(Double(app.processIdentifier)),
+          "scope": .string("window")
+        ])
+      } catch let error as PilotRuntimeError {
+        result["screenshot"] = .null
+        result["screenshotError"] = .object([
+          "code": .string(error.code),
+          "message": .string(error.message)
+        ])
+      }
+    }
     if includeDebug {
       result["focusedElement"] = focusedElement
       result["focusedElementText"] = .from(focusedElementText)
@@ -475,8 +511,9 @@ public final class AccessibilityPilot {
 
   private func click(arguments: [String: JSONValue]) throws -> JSONValue {
     try activateAppIfRequested(arguments: arguments)
-    let clickCount = max(1, arguments["click_count"]?.intValue ?? 1)
-    let physical = physicalClickRequested(arguments)
+    let clickCount = try optionalIntegerArgument(arguments, "click_count", minimum: 1) ?? 1
+    let mouseButton = try mouseButtonArgument(arguments)
+    let physical = physicalClickRequested(arguments) || mouseButton != .left
 
     if let element = try actionElement(arguments: arguments) {
       if physical {
@@ -485,6 +522,7 @@ public final class AccessibilityPilot {
         try postMouseClick(
           at: point,
           clickCount: clickCount,
+          button: mouseButton,
           targetPID: try runningApplication(arguments: arguments).processIdentifier
         )
         return .object([
@@ -516,6 +554,7 @@ public final class AccessibilityPilot {
       try postMouseClick(
         at: point,
         clickCount: clickCount,
+        button: mouseButton,
         targetPID: try runningApplication(arguments: arguments).processIdentifier
       )
       method = "cg_mouse_click"
@@ -552,17 +591,137 @@ public final class AccessibilityPilot {
     }
 
     let app = try runningApplication(arguments: arguments)
-    app.activate(options: [.activateAllWindows])
-    waitForActivation(app)
-    guard app.isActive else {
-      throw PilotRuntimeError(
-        code: "action_unavailable",
-        message: "Unable to type because the requested app did not become active."
-      )
-    }
     try postKeyboardText(text, targetPID: app.processIdentifier)
     return .object([
       "charactersTyped": .number(Double(text.count)),
+      "success": .bool(true)
+    ])
+  }
+
+  private func pressKey(arguments: [String: JSONValue]) throws -> JSONValue {
+    guard let key = arguments["key"]?.stringValue, !key.trimmingCharacters(in: .whitespaces).isEmpty else {
+      throw PilotRuntimeError(code: "invalid_request", message: "press_key requires key.")
+    }
+    let app = try prepareKeyboardTarget(arguments: arguments)
+    let chord = try KeyboardChord.parse(key)
+    guard keyboardTargetIsRunning(app.processIdentifier) else {
+      throw PilotRuntimeError(code: "action_unavailable", message: "The requested app is no longer running.")
+    }
+    postKeyboardChord(chord, targetPID: app.processIdentifier)
+    return .object(["key": .string(key), "success": .bool(true)])
+  }
+
+  private func drag(arguments: [String: JSONValue]) throws -> JSONValue {
+    let from = try coordinatePoint(arguments: arguments, xName: "from_x", yName: "from_y")
+    let to = try coordinatePoint(arguments: arguments, xName: "to_x", yName: "to_y")
+    let app = try runningApplication(arguments: arguments)
+    _ = activate(app)
+    waitForActivation(app)
+    guard app.isActive else {
+      throw PilotRuntimeError(code: "action_unavailable", message: "Unable to drag because the requested app did not become active.")
+    }
+    showComputerUseCursor(at: from)
+    try postMouseDrag(from: from, to: to, targetPID: app.processIdentifier)
+    showComputerUseCursor(at: to)
+    return .object([
+      "from_x": .number(from.x), "from_y": .number(from.y),
+      "to_x": .number(to.x), "to_y": .number(to.y),
+      "success": .bool(true)
+    ])
+  }
+
+  private func performSecondaryAction(arguments: [String: JSONValue]) throws -> JSONValue {
+    guard let requested = arguments["action"]?.stringValue, !requested.isEmpty else {
+      throw PilotRuntimeError(code: "invalid_request", message: "perform_secondary_action requires action.")
+    }
+    let element = try elementByRequiredIndexOrPath(arguments: arguments)
+    let supported = actionNames(element)
+    guard let action = supported.first(where: { $0 == requested || actionLabel($0) == requested.lowercased() }) else {
+      throw PilotRuntimeError(
+        code: "action_unavailable",
+        message: "The element does not advertise accessibility action \(requested)."
+      )
+    }
+    try performAction(element, action: action)
+    return .object([
+      "action": .string(action),
+      "success": .bool(true),
+      "target": describeElement(element, path: "target")
+    ])
+  }
+
+  private func paste(arguments: [String: JSONValue]) throws -> JSONValue {
+    guard let text = arguments["text"]?.stringValue else {
+      throw PilotRuntimeError(code: "invalid_request", message: "paste requires text.")
+    }
+    let format = arguments["format"]?.stringValue ?? "text"
+    guard ["text", "md", "html"].contains(format) else {
+      throw PilotRuntimeError(code: "invalid_request", message: "paste format must be text, md, or html.")
+    }
+    let app = try prepareKeyboardTarget(arguments: arguments)
+    guard keyboardTargetIsRunning(app.processIdentifier) else {
+      throw PilotRuntimeError(code: "action_unavailable", message: "The requested app is no longer running.")
+    }
+
+    let pasteboard = NSPasteboard.general
+    let snapshot = PasteboardSnapshot(pasteboard: pasteboard)
+    pasteboard.clearContents()
+    let item = NSPasteboardItem()
+    item.setString(text, forType: .string)
+    if format == "html" {
+      item.setString(text, forType: .html)
+    } else if format == "md" {
+      item.setString(text, forType: NSPasteboard.PasteboardType("net.daringfireball.markdown"))
+    }
+    pasteboard.writeObjects([item])
+    let ownedChangeCount = pasteboard.changeCount
+    postKeyboardChord(try KeyboardChord.parse("Super_L+v"), targetPID: app.processIdentifier)
+    RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.1))
+    let restored = pasteboard.changeCount == ownedChangeCount
+    if restored {
+      snapshot.restore(to: pasteboard)
+    }
+    return .object([
+      "charactersPasted": .number(Double(text.count)),
+      "clipboardRestored": .bool(restored),
+      "format": .string(format),
+      "success": .bool(true)
+    ])
+  }
+
+  private func selectText(arguments: [String: JSONValue]) throws -> JSONValue {
+    guard let needle = arguments["text"]?.stringValue, !needle.isEmpty else {
+      throw PilotRuntimeError(code: "invalid_request", message: "select_text requires non-empty text.")
+    }
+    let selectionType = arguments["selection_type"]?.stringValue ?? "text"
+    guard ["text", "cursor_before", "cursor_after"].contains(selectionType) else {
+      throw PilotRuntimeError(code: "invalid_request", message: "selection_type must be text, cursor_before, or cursor_after.")
+    }
+    let element = try elementByRequiredIndexOrPath(arguments: arguments)
+    guard let value = stringAttribute(element, kAXValueAttribute) else {
+      throw PilotRuntimeError(code: "action_unavailable", message: "The target element has no textual AXValue.")
+    }
+    let range = try TextSelectionMatcher.uniqueRange(
+      in: value,
+      text: needle,
+      prefix: arguments["prefix"]?.stringValue,
+      suffix: arguments["suffix"]?.stringValue
+    )
+    var selectedRange = CFRange(location: range.location, length: range.length)
+    if selectionType == "cursor_before" {
+      selectedRange.length = 0
+    } else if selectionType == "cursor_after" {
+      selectedRange.location += selectedRange.length
+      selectedRange.length = 0
+    }
+    guard let axRange = AXValueCreate(.cfRange, &selectedRange) else {
+      throw PilotRuntimeError(code: "action_unavailable", message: "Unable to encode the selected text range.")
+    }
+    try setAttribute(element, kAXSelectedTextRangeAttribute, value: axRange)
+    return .object([
+      "location": .number(Double(selectedRange.location)),
+      "length": .number(Double(selectedRange.length)),
+      "selection_type": .string(selectionType),
       "success": .bool(true)
     ])
   }
@@ -581,7 +740,10 @@ public final class AccessibilityPilot {
 
   private func scroll(arguments: [String: JSONValue]) throws -> JSONValue {
     let direction = arguments["direction"]?.stringValue ?? "down"
-    let pages = max(1, arguments["pages"]?.intValue ?? 1)
+    guard ["up", "down", "left", "right"].contains(direction) else {
+      throw PilotRuntimeError(code: "invalid_request", message: "direction must be up, down, left, or right.")
+    }
+    let pages = try optionalIntegerArgument(arguments, "pages", minimum: 1) ?? 1
 
     if let element = try elementByOptionalIndex(arguments: arguments) {
       if let point = try? centerPoint(of: element) {
@@ -613,41 +775,6 @@ public final class AccessibilityPilot {
     return .object([
       "direction": .string(direction),
       "pages": .number(Double(pages)),
-      "success": .bool(true)
-    ])
-  }
-
-  private func perform(arguments: [String: JSONValue]) throws -> JSONValue {
-    guard let action = arguments["action"]?.stringValue else {
-      throw PilotRuntimeError(code: "invalid_request", message: "perform requires action.")
-    }
-
-    let root = try rootElement(arguments: arguments)
-    let target = try resolveTarget(root: root, arguments: arguments)
-
-    switch action {
-    case "press":
-      try performAction(target, action: kAXPressAction)
-    case "focus":
-      try setAttribute(target, kAXFocusedAttribute, value: kCFBooleanTrue)
-    case "set_value":
-      guard let text = arguments["text"]?.stringValue else {
-        throw PilotRuntimeError(code: "invalid_request", message: "set_value requires text.")
-      }
-      try setAttribute(target, kAXValueAttribute, value: text as CFTypeRef)
-    case "type_text":
-      guard let text = arguments["text"]?.stringValue else {
-        throw PilotRuntimeError(code: "invalid_request", message: "type_text requires text.")
-      }
-      try setAttribute(target, kAXFocusedAttribute, value: kCFBooleanTrue)
-      try setAttribute(target, kAXValueAttribute, value: text as CFTypeRef)
-    default:
-      throw PilotRuntimeError(code: "unknown_action", message: "Unknown action \(action).")
-    }
-
-    return .object([
-      "action": .string(action),
-      "target": describeElement(target, path: "target"),
       "success": .bool(true)
     ])
   }
@@ -696,16 +823,10 @@ public final class AccessibilityPilot {
     maxNodes: Int?
   ) throws -> (element: AXUIElement, index: Int, path: String, requestedIndex: Int?) {
     guard let rootElementIndex = try optionalElementIndexArgument(arguments, "rootElementIndex") else {
-      return (appRoot, 0, "root", nil)
+      return (appRoot, stableElementIndex(for: appRoot), "root", nil)
     }
-
-    let result = try elementAtIndexWithPath(
-      root: appRoot,
-      targetIndex: rootElementIndex,
-      maxDepth: maxDepth,
-      maxNodes: maxNodes
-    )
-    return (result.element, rootElementIndex, result.path, rootElementIndex)
+    let element = try stableElement(at: rootElementIndex, arguments: arguments)
+    return (element, rootElementIndex, "element[\(rootElementIndex)]", rootElementIndex)
   }
 
   private func runningApplication(arguments: [String: JSONValue]) throws -> NSRunningApplication {
@@ -720,38 +841,74 @@ public final class AccessibilityPilot {
     }
 
     if let bundleIdentifier = arguments["bundleIdentifier"]?.stringValue {
-      guard let app = NSWorkspace.shared.runningApplications.first(where: {
+      if let app = NSWorkspace.shared.runningApplications.first(where: {
         $0.bundleIdentifier == bundleIdentifier && !$0.isTerminated
-      }) else {
-        throw PilotRuntimeError(
-          code: "app_not_found",
-          message: "Could not find running app with bundle identifier \(bundleIdentifier)."
-        )
+      }) {
+        return app
       }
-      return app
+      return try launchInstalledApplication(matching: bundleIdentifier)
     }
 
     if let appPath = arguments["path"]?.stringValue {
       let targetPath = URL(fileURLWithPath: appPath).standardizedFileURL.path
-      guard let app = NSWorkspace.shared.runningApplications.first(where: {
+      if let app = NSWorkspace.shared.runningApplications.first(where: {
         $0.bundleURL?.standardizedFileURL.path == targetPath && !$0.isTerminated
-      }) else {
-        throw PilotRuntimeError(code: "app_not_found", message: "Could not find running app at \(appPath).")
+      }) {
+        return app
+      }
+      _ = try launchApp(arguments: ["path": .string(targetPath), "activate": .bool(true)])
+      guard let app = runningApplication(bundleIdentifier: nil, path: targetPath) else {
+        throw PilotRuntimeError(code: "app_not_found", message: "Launched app at \(appPath) did not become available.")
       }
       return app
     }
 
     if let appName = arguments["app"]?.stringValue {
-      let app = NSWorkspace.shared.runningApplications.first {
+      if let app = NSWorkspace.shared.runningApplications.first(where: {
         $0.localizedName == appName || $0.bundleIdentifier == appName
+      }) {
+        return app
       }
-      guard let app else {
-        throw PilotRuntimeError(code: "app_not_found", message: "Could not find running app \(appName).")
-      }
-      return app
+      return try launchInstalledApplication(matching: appName)
     }
 
     return try frontmostApplication()
+  }
+
+  private func launchInstalledApplication(matching identifier: String) throws -> NSRunningApplication {
+    let matches = installedApplications(bundleIdentifier: nil).filter {
+      $0.localizedName == identifier || $0.bundleIdentifier == identifier
+    }
+    guard matches.count == 1, let match = matches.first else {
+      throw PilotRuntimeError(
+        code: matches.isEmpty ? "app_not_found" : "ambiguous_target",
+        message: matches.isEmpty
+          ? "Could not find installed app \(identifier)."
+          : "Multiple installed apps match \(identifier); use a bundle identifier."
+      )
+    }
+    _ = try launchApp(arguments: ["path": .string(match.path), "activate": .bool(true)])
+    guard let app = runningApplication(bundleIdentifier: match.bundleIdentifier, path: match.path) else {
+      throw PilotRuntimeError(code: "app_not_found", message: "Launched app \(identifier) did not become available.")
+    }
+    return app
+  }
+
+  private func settleBeforeObservation(app: NSRunningApplication) {
+    guard let actionAt = pendingSettleAtByPID.removeValue(forKey: app.processIdentifier) else { return }
+    let graceDeadline = actionAt.addingTimeInterval(1)
+    if graceDeadline > Date() {
+      RunLoop.main.run(until: graceDeadline)
+    }
+    let deadline = Date(timeIntervalSinceNow: 4)
+    let root = AXUIElementCreateApplication(app.processIdentifier)
+    while Date() < deadline {
+      var busyValue: CFTypeRef?
+      let busy = AXUIElementCopyAttributeValue(root, kAXElementBusyAttribute as CFString, &busyValue) == .success
+        && (busyValue as? Bool) == true
+      if !busy { return }
+      RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.2))
+    }
   }
 
   private func processIdentifierArgument(_ arguments: [String: JSONValue]) throws -> pid_t? {
@@ -868,7 +1025,7 @@ public final class AccessibilityPilot {
     }
     let app = try runningApplication(arguments: arguments)
     _ = targetAccessibilitySupport.prepare(processIdentifier: app.processIdentifier)
-    app.activate(options: [.activateAllWindows])
+    _ = activate(app)
     waitForActivation(app)
   }
 
@@ -879,6 +1036,21 @@ public final class AccessibilityPilot {
       }
       usleep(50_000)
     }
+  }
+
+  @discardableResult
+  private func activate(_ app: NSRunningApplication) -> Bool {
+    app.unhide()
+    let appElement = preparedRootElement(processIdentifier: app.processIdentifier)
+    _ = AXUIElementSetAttributeValue(appElement, kAXFrontmostAttribute as CFString, kCFBooleanTrue)
+    if let window = try? copyElementAttribute(appElement, kAXFocusedWindowAttribute) {
+      _ = AXUIElementSetAttributeValue(window, kAXMainAttribute as CFString, kCFBooleanTrue)
+      _ = AXUIElementSetAttributeValue(window, kAXFocusedAttribute as CFString, kCFBooleanTrue)
+      _ = AXUIElementPerformAction(window, kAXRaiseAction as CFString)
+    }
+    let requested = app.activate(options: [.activateAllWindows])
+    waitForActivation(app)
+    return requested || app.isActive
   }
 
   private func frontmostApplication() throws -> NSRunningApplication {
@@ -934,10 +1106,7 @@ public final class AccessibilityPilot {
     guard let index = try optionalElementIndexArgument(arguments, "element_index", alternateName: "elementIndex") else {
       return nil
     }
-    let root = try explicitRoot ?? rootElement(arguments: arguments)
-    let maxDepth = try optionalIntegerArgument(arguments, "maxDepth", minimum: 0)
-    let maxNodes = try optionalIntegerArgument(arguments, "maxNodes", minimum: 1)
-    return try elementAtIndex(root: root, targetIndex: index, maxDepth: maxDepth, maxNodes: maxNodes)
+    return try stableElement(at: index, arguments: arguments)
   }
 
   private func actionElement(arguments: [String: JSONValue]) throws -> AXUIElement? {
@@ -959,70 +1128,6 @@ public final class AccessibilityPilot {
       return try elementAtPath(root: root, path: path)
     }
     throw PilotRuntimeError(code: "invalid_request", message: "Action requires element_index or path.")
-  }
-
-  private func elementAtIndex(root: AXUIElement, targetIndex: Int, maxDepth: Int?, maxNodes: Int?) throws -> AXUIElement {
-    try elementAtIndexWithPath(root: root, targetIndex: targetIndex, maxDepth: maxDepth, maxNodes: maxNodes).element
-  }
-
-  private func elementAtIndexWithPath(
-    root: AXUIElement,
-    targetIndex: Int,
-    maxDepth: Int?,
-    maxNodes: Int?
-  ) throws -> (element: AXUIElement, path: String) {
-    var currentIndex = 0
-    var remaining = maxNodes
-    if let result = findElementAtIndex(
-      root,
-      targetIndex: targetIndex,
-      path: "root",
-      depth: 0,
-      maxDepth: maxDepth,
-      remaining: &remaining,
-      currentIndex: &currentIndex
-    ) {
-      return result
-    }
-    throw PilotRuntimeError(code: "element_not_found", message: "No element exists at element_index \(targetIndex). Call get_app_state again.")
-  }
-
-  private func findElementAtIndex(
-    _ element: AXUIElement,
-    targetIndex: Int,
-    path: String,
-    depth: Int,
-    maxDepth: Int?,
-    remaining: inout Int?,
-    currentIndex: inout Int
-  ) -> (element: AXUIElement, path: String)? {
-    guard consumeNode(&remaining) else {
-      return nil
-    }
-
-    if currentIndex == targetIndex {
-      return (element, path)
-    }
-    currentIndex += 1
-
-    guard shouldTraverseChildren(depth: depth, maxDepth: maxDepth),
-          let children = try? copyElementArrayAttribute(element, kAXChildrenAttribute) else {
-      return nil
-    }
-    for (childIndex, child) in children.enumerated() {
-      if let match = findElementAtIndex(
-        child,
-        targetIndex: targetIndex,
-        path: "\(path).children[\(childIndex)]",
-        depth: depth + 1,
-        maxDepth: maxDepth,
-        remaining: &remaining,
-        currentIndex: &currentIndex
-      ) {
-        return match
-      }
-    }
-    return nil
   }
 
   private func elementAtPath(root: AXUIElement, path: String) throws -> AXUIElement {
@@ -1118,57 +1223,35 @@ public final class AccessibilityPilot {
     return true
   }
 
-  private func snapshotElement(
-    _ element: AXUIElement,
-    path: String,
-    depth: Int,
-    maxDepth: Int?,
-    remaining: inout Int?
-  ) -> JSONValue {
-    guard consumeNode(&remaining) else {
-      return .object(["truncated": .bool(true)])
-    }
-
-    var node = describeElement(element, path: path).objectValue ?? [:]
-    guard shouldTraverseChildren(depth: depth, maxDepth: maxDepth),
-          let children = try? copyElementArrayAttribute(element, kAXChildrenAttribute),
-          !children.isEmpty else {
-      return .object(node)
-    }
-
-    node["children"] = .array(
-      boundedChildNodes(children, remaining: &remaining) { child, index, remaining in
-        snapshotElement(
-          child,
-          path: "\(path).children[\(index)]",
-          depth: depth + 1,
-          maxDepth: maxDepth,
-          remaining: &remaining
-        )
-      }
-    )
-    return .object(node)
-  }
-
   private func indexedSnapshotElement(
     _ element: AXUIElement,
     path: String,
     depth: Int,
+    parentElementIndex: Int?,
+    siblingIndex: Int,
     parentRole: String?,
     includeMacChrome: Bool,
     pendingSiblingLabel: inout String?,
     maxDepth: Int?,
     remaining: inout Int?,
-    nextIndex: inout Int,
+    visitedCount: inout Int,
     elements: inout [JSONValue],
-    treeLines: inout [String]
+    stateRows: inout [AccessibilityStateRow],
+    observedElementIDs: inout Set<Int>
   ) -> JSONValue {
     guard consumeNode(&remaining) else {
       return .object(["truncated": .bool(true)])
     }
 
-    let index = nextIndex
-    nextIndex += 1
+    let index = stableElementIndex(for: element)
+    visitedCount += 1
+    guard observedElementIDs.insert(index).inserted else {
+      return .object([
+        "index": .string(String(index)),
+        "path": .string(path),
+        "reference": .bool(true)
+      ])
+    }
     var node = describeElement(element, path: path).objectValue ?? [:]
     node["index"] = .string(String(index))
     node["actions"] = .array(actionNames(element).map { .string($0) })
@@ -1181,7 +1264,13 @@ public final class AccessibilityPilot {
       applyPendingSiblingLabel(&node, role: role, pendingSiblingLabel: &pendingSiblingLabel)
     }
     if shouldRenderStateLine(node, depth: depth, parentRole: parentRole, includeMacChrome: includeMacChrome) {
-      treeLines.append("\(stateLineIndent(depth))\(elementLine(node))")
+      let line = "\(stateLineIndent(depth))\(elementLine(node))"
+      stateRows.append(AccessibilityStateRow(
+        elementIndex: index,
+        line: line,
+        parentElementIndex: parentElementIndex,
+        siblingIndex: siblingIndex
+      ))
     }
     let elementSummary = compactElementSummary(node)
     if shouldExposeElement(elementSummary) {
@@ -1201,43 +1290,33 @@ public final class AccessibilityPilot {
         child,
         path: "\(path).children[\(childIndex)]",
         depth: depth + 1,
+        parentElementIndex: index,
+        siblingIndex: childIndex,
         parentRole: role,
         includeMacChrome: includeMacChrome,
         pendingSiblingLabel: &pendingSiblingLabel,
         maxDepth: maxDepth,
         remaining: &remaining,
-        nextIndex: &nextIndex,
+        visitedCount: &visitedCount,
         elements: &elements,
-        treeLines: &treeLines
+        stateRows: &stateRows,
+        observedElementIDs: &observedElementIDs
       )
     }
     node["children"] = .array(childNodes)
     return .object(node)
   }
 
-  private func appStateText(
-    app: NSRunningApplication,
-    root: AXUIElement,
-    treeLines: [String],
-    focusedElementText: String?,
-    truncated: Bool
-  ) -> String {
+  private func appStateHeader(app: NSRunningApplication, root: AXUIElement) -> [String] {
     var lines = [
       "Computer Use Accessibility list",
-      "Use the leading number on a line as element_index for click, set_value, or scroll.",
+      "Use the leading stable number as element_index for actions.",
       "App=\(app.bundleURL?.path ?? app.bundleIdentifier ?? app.localizedName ?? String(app.processIdentifier)) (bundleID \(app.bundleIdentifier ?? "unknown"), pid \(app.processIdentifier))"
     ]
     if let window = windowDescription(for: root).objectValue {
       lines.append("Window: \(elementLine(window))")
     }
-    lines.append(contentsOf: treeLines)
-    if truncated {
-      lines.append("Tree truncated. Re-run with a higher maxNodes value if needed.")
-    }
-    if let focusedElementText {
-      lines.append(focusedElementText)
-    }
-    return lines.joined(separator: "\n")
+    return lines
   }
 
   private func optionalIntegerArgument(_ arguments: [String: JSONValue], _ name: String, minimum: Int) throws -> Int? {
@@ -1312,7 +1391,7 @@ public final class AccessibilityPilot {
   }
 
   private func stateLineIndent(_ depth: Int) -> String {
-    ""
+    String(repeating: "  ", count: depth)
   }
 
   private func shouldRenderStateLine(
@@ -1762,9 +1841,16 @@ public final class AccessibilityPilot {
   }
 
   private func coordinatePoint(arguments: [String: JSONValue]) throws -> CGPoint {
-    guard let x = arguments["x"]?.numberValue,
-          let y = arguments["y"]?.numberValue else {
-      throw PilotRuntimeError(code: "invalid_request", message: "click requires element_index or x and y.")
+    try coordinatePoint(arguments: arguments, xName: "x", yName: "y")
+  }
+
+  private func coordinatePoint(arguments: [String: JSONValue], xName: String, yName: String) throws -> CGPoint {
+    guard let x = arguments[xName]?.numberValue,
+          let y = arguments[yName]?.numberValue else {
+      throw PilotRuntimeError(
+        code: "invalid_request",
+        message: "Coordinate actions require numeric \(xName) and \(yName)."
+      )
     }
     return CGPoint(x: x, y: y)
   }
@@ -1847,16 +1933,46 @@ public final class AccessibilityPilot {
     RunLoop.main.run(until: Date(timeIntervalSinceNow: duration))
   }
 
-  private func postMouseClick(at point: CGPoint, clickCount: Int, targetPID: pid_t) throws {
+  private func postMouseClick(
+    at point: CGPoint,
+    clickCount: Int,
+    button: CGMouseButton = .left,
+    targetPID: pid_t
+  ) throws {
     let input = targetBoundMouseInput()
     do {
-      try input.click(at: point, clickCount: clickCount, targetPID: targetPID)
+      try input.click(at: point, clickCount: clickCount, button: button, targetPID: targetPID)
     } catch TargetBoundMouseInputError.targetLostFocus {
       throw PilotRuntimeError(
         code: "action_unavailable",
         message: "Unable to click because the requested app no longer owns focus."
       )
     }
+  }
+
+  private func postMouseDrag(from: CGPoint, to: CGPoint, targetPID: pid_t) throws {
+    guard NSWorkspace.shared.frontmostApplication?.processIdentifier == targetPID else {
+      throw PilotRuntimeError(code: "action_unavailable", message: "Unable to drag because the requested app no longer owns focus.")
+    }
+    let original = CGEvent(source: nil)?.location ?? .zero
+    defer { CGWarpMouseCursorPosition(original) }
+    let source = CGEventSource(stateID: .hidSystemState)
+    CGEvent(mouseEventSource: source, mouseType: .leftMouseDown, mouseCursorPosition: from, mouseButton: .left)?
+      .post(tap: .cghidEventTap)
+    for step in 1...20 {
+      guard NSWorkspace.shared.frontmostApplication?.processIdentifier == targetPID else {
+        CGEvent(mouseEventSource: source, mouseType: .leftMouseUp, mouseCursorPosition: from, mouseButton: .left)?
+          .post(tap: .cghidEventTap)
+        throw PilotRuntimeError(code: "action_unavailable", message: "The requested app lost focus during the drag.")
+      }
+      let progress = CGFloat(step) / 20
+      let point = CGPoint(x: from.x + ((to.x - from.x) * progress), y: from.y + ((to.y - from.y) * progress))
+      CGEvent(mouseEventSource: source, mouseType: .leftMouseDragged, mouseCursorPosition: point, mouseButton: .left)?
+        .post(tap: .cghidEventTap)
+      usleep(10_000)
+    }
+    CGEvent(mouseEventSource: source, mouseType: .leftMouseUp, mouseCursorPosition: to, mouseButton: .left)?
+      .post(tap: .cghidEventTap)
   }
 
   private func targetBoundMouseInput() -> TargetBoundMouseInput {
@@ -1874,20 +1990,33 @@ public final class AccessibilityPilot {
     )
   }
 
-  private func postMouseEvents(at point: CGPoint, clickCount: Int) {
+  private func postMouseEvents(at point: CGPoint, clickCount: Int, button: CGMouseButton) {
     let source = CGEventSource(stateID: .hidSystemState)
+    let downType: CGEventType
+    let upType: CGEventType
+    switch button {
+    case .right:
+      downType = .rightMouseDown
+      upType = .rightMouseUp
+    case .center:
+      downType = .otherMouseDown
+      upType = .otherMouseUp
+    default:
+      downType = .leftMouseDown
+      upType = .leftMouseUp
+    }
     for clickIndex in 1...clickCount {
       let down = CGEvent(
         mouseEventSource: source,
-        mouseType: .leftMouseDown,
+        mouseType: downType,
         mouseCursorPosition: point,
-        mouseButton: .left
+        mouseButton: button
       )
       let up = CGEvent(
         mouseEventSource: source,
-        mouseType: .leftMouseUp,
+        mouseType: upType,
         mouseCursorPosition: point,
-        mouseButton: .left
+        mouseButton: button
       )
       down?.setIntegerValueField(.mouseEventClickState, value: Int64(clickIndex))
       up?.setIntegerValueField(.mouseEventClickState, value: Int64(clickIndex))
@@ -1900,19 +2029,29 @@ public final class AccessibilityPilot {
     }
   }
 
+  private func mouseButtonArgument(_ arguments: [String: JSONValue]) throws -> CGMouseButton {
+    switch arguments["mouse_button"]?.stringValue?.lowercased() ?? "left" {
+    case "left", "l": return .left
+    case "right", "r": return .right
+    case "middle", "m", "center": return .center
+    default:
+      throw PilotRuntimeError(code: "invalid_request", message: "mouse_button must be left, right, or middle.")
+    }
+  }
+
   private func postKeyboardText(_ text: String, targetPID: pid_t) throws {
     let source = CGEventSource(stateID: .hidSystemState)
     let input = TargetBoundKeyboardInput(
-      isTargetFocused: keyboardTargetOwnsFocus,
+      isTargetFocused: keyboardTargetIsRunning,
       pauseBetweenCharacters: { usleep(5_000) },
       postCharacter: { [self] character in
         switch character {
         case "\n", "\r":
-          postKey(source: source, keyCode: 36)
+          postKey(source: source, keyCode: 36, targetPID: targetPID)
         case "\t":
-          postKey(source: source, keyCode: 48)
+          postKey(source: source, keyCode: 48, targetPID: targetPID)
         default:
-          postUnicodeCharacter(source: source, character)
+          postUnicodeCharacter(source: source, character, targetPID: targetPID)
         }
       }
     )
@@ -1921,49 +2060,84 @@ public final class AccessibilityPilot {
     } catch TargetBoundKeyboardInputError.targetLostFocus {
       throw PilotRuntimeError(
         code: "action_unavailable",
-        message: "Unable to type because the requested app no longer owns keyboard focus."
+        message: "Unable to type because the requested app is no longer running."
       )
     }
   }
 
-  private func keyboardTargetOwnsFocus(_ targetPID: pid_t) -> Bool {
-    guard NSWorkspace.shared.frontmostApplication?.processIdentifier == targetPID else {
-      return false
+  private func prepareKeyboardTarget(arguments: [String: JSONValue]) throws -> NSRunningApplication {
+    guard arguments["app"] != nil || arguments["pid"] != nil else {
+      throw PilotRuntimeError(code: "invalid_request", message: "Keyboard actions require app or pid.")
     }
-
-    let appElement = AXUIElementCreateApplication(targetPID)
-    var focusedValue: CFTypeRef?
-    guard AXUIElementCopyAttributeValue(
-      appElement,
-      kAXFocusedUIElementAttribute as CFString,
-      &focusedValue
-    ) == .success,
-      let focusedValue,
-      CFGetTypeID(focusedValue) == AXUIElementGetTypeID() else {
-      return false
-    }
-
-    let focusedElement = focusedValue as! AXUIElement
-    return focusedElement.pid == targetPID
+    return try runningApplication(arguments: arguments)
   }
 
-  private func postUnicodeCharacter(source: CGEventSource?, _ character: Character) {
+  private func postKeyboardChord(_ chord: KeyboardChord, targetPID: pid_t) {
+    let source = CGEventSource(stateID: .hidSystemState)
+    if let text = chord.text, let character = text.first {
+      postUnicodeCharacter(source: source, character, targetPID: targetPID)
+      return
+    }
+    guard let keyCode = chord.keyCode else { return }
+    let down = CGEvent(keyboardEventSource: source, virtualKey: keyCode, keyDown: true)
+    down?.flags = chord.flags
+    down?.postToPid(targetPID)
+    let up = CGEvent(keyboardEventSource: source, virtualKey: keyCode, keyDown: false)
+    up?.flags = chord.flags
+    up?.postToPid(targetPID)
+  }
+
+  private func stableElementIndex(for element: AXUIElement) -> Int {
+    let hash = CFHash(element)
+    if let existing = elementBuckets[hash]?.first(where: { CFEqual($0.element, element) }) {
+      return existing.index
+    }
+    let index = nextElementIndex
+    nextElementIndex += 1
+    elementBuckets[hash, default: []].append((index, element))
+    return index
+  }
+
+  private func stableElement(at index: Int, arguments: [String: JSONValue]) throws -> AXUIElement {
+    guard let element = elementBuckets.values.lazy.flatMap({ $0 }).first(where: { $0.index == index })?.element else {
+      throw PilotRuntimeError(code: "stale_element", message: "Element \(index) is not part of this Computer Use session. Call get_app_state again.")
+    }
+    let app = try runningApplication(arguments: arguments)
+    guard element.pid == app.processIdentifier else {
+      throw PilotRuntimeError(code: "stale_element", message: "Element \(index) belongs to a different app. Call get_app_state again.")
+    }
+    guard latestObservedElementIDsByPID[app.processIdentifier]?.contains(index) == true else {
+      throw PilotRuntimeError(code: "stale_element", message: "Element \(index) is not present in the latest app state. Call get_app_state again.")
+    }
+    var role: CFTypeRef?
+    guard AXUIElementCopyAttributeValue(element, kAXRoleAttribute as CFString, &role) == .success else {
+      throw PilotRuntimeError(code: "stale_element", message: "Element \(index) is no longer available. Call get_app_state again.")
+    }
+    return element
+  }
+
+  private func keyboardTargetIsRunning(_ targetPID: pid_t) -> Bool {
+    guard let app = NSRunningApplication(processIdentifier: targetPID) else { return false }
+    return !app.isTerminated
+  }
+
+  private func postUnicodeCharacter(source: CGEventSource?, _ character: Character, targetPID: pid_t) {
     var units = Array(String(character).utf16)
     let down = CGEvent(keyboardEventSource: source, virtualKey: 0, keyDown: true)
     down?.keyboardSetUnicodeString(stringLength: units.count, unicodeString: &units)
-    down?.post(tap: .cghidEventTap)
+    down?.postToPid(targetPID)
 
     let up = CGEvent(keyboardEventSource: source, virtualKey: 0, keyDown: false)
     up?.keyboardSetUnicodeString(stringLength: units.count, unicodeString: &units)
-    up?.post(tap: .cghidEventTap)
+    up?.postToPid(targetPID)
   }
 
-  private func postKey(source: CGEventSource?, keyCode: CGKeyCode) {
+  private func postKey(source: CGEventSource?, keyCode: CGKeyCode, targetPID: pid_t) {
     let down = CGEvent(keyboardEventSource: source, virtualKey: keyCode, keyDown: true)
-    down?.post(tap: .cghidEventTap)
+    down?.postToPid(targetPID)
 
     let up = CGEvent(keyboardEventSource: source, virtualKey: keyCode, keyDown: false)
-    up?.post(tap: .cghidEventTap)
+    up?.postToPid(targetPID)
   }
 
   private func postScroll(direction: String, pages: Int) {

@@ -39,12 +39,17 @@ commands. Each tool maps to one Pilot method.
 | `computer_use_find_apps` | `find_apps` | Find an installed app that is not running. | `query?`, `bundleIdentifier?`, `maxResults?` |
 | `computer_use_launch_app` | `launch_app` | Start an app. | `bundleIdentifier?`, `path?`, `activate?` |
 | `computer_use_focus_app` | `focus_app` | Bring a running app forward. | `app?`, `bundleIdentifier?`, `pid?` |
-| `computer_use_get_app_state` | `get_app_state` | Inspect one app and return compact, line-numbered UI state. | `app?`, `pid?`, `rootElementIndex?`, traversal options |
+| `computer_use_get_app_state` | `get_app_state` | Return a screenshot plus full or diffed Accessibility state. | app selector, `disableDiff?`, `includeScreenshot?`, `rootElementIndex?`, traversal options |
 | `computer_use_click` | `click` | Activate a fresh accessibility element or a coordinate target. | app selector plus `element_index`, or `x` and `y` |
 | `computer_use_dismiss` | `dismiss` | Dismiss an active native menu or popover with `AXCancel`. | app selector and optional accessibility scope or semantic selector |
+| `computer_use_press_key` | `press_key` | Press a key or keyboard chord. | app selector, `key` |
 | `computer_use_type_text` | `type_text` | Type literal text into the focused element. | app selector plus `text` |
 | `computer_use_set_value` | `set_value` | Set `AXValue` on a normal settable element. | app selector, `element_index`, `value` |
 | `computer_use_scroll` | `scroll` | Scroll an element or the current view. | app selector, `element_index?`, direction or deltas |
+| `computer_use_drag` | `drag` | Drag between foreground screen coordinates. | app selector, `from_x`, `from_y`, `to_x`, `to_y` |
+| `computer_use_perform_secondary_action` | `perform_secondary_action` | Invoke an action advertised by an element. | app selector, `element_index`, `action` |
+| `computer_use_paste` | `paste` | Paste rich or plain content without taking ownership of the clipboard. | app selector, `text`, `format` |
+| `computer_use_select_text` | `select_text` | Select matching text or place the insertion cursor. | app selector, `element_index`, `text`, optional context and selection type |
 
 The function tools should expose only the arguments meaningful to the agent.
 They can also accept product-only arguments, such as
@@ -81,7 +86,9 @@ or a structured failure:
 {"id":"a-request-id","ok":false,"error":{"code":"permission_denied","message":"..."}}
 ```
 
-Preserve correlation by ID when reusing a Pilot process. Map the Pilot's stable
+Keep one Pilot process alive for the complete Computer Use session; v2 state
+revisions and stable element identifiers depend on it. Preserve correlation by
+ID and map the Pilot's stable
 error codes into the agent runtime's normal function-call error shape. Never
 write logs or diagnostics to stdout; it is reserved for protocol responses.
 
@@ -111,28 +118,36 @@ The model should work from fresh accessibility state rather than inferred
 screen coordinates:
 
 1. Call `computer_use_status` and establish permission.
-2. Use `computer_use_list_apps`, or `computer_use_find_apps` then
-   `computer_use_launch_app`, to select the target.
+2. Use `computer_use_list_apps` or target an exact installed app directly; the
+   Pilot transparently launches an exact non-running match.
 3. Call `computer_use_get_app_state`.
-4. Prefer a semantic selector when available; otherwise select one line's fresh `element_index` and make exactly one action call.
+4. Prefer an indexed element from the latest observation. Its stable
+   `element_index` remains associated with that element across hierarchy diffs.
 5. Call `computer_use_get_app_state` again before the next UI decision.
 
 Use the menu-bar accessibility scope to inspect native menus and `dismiss`
 before returning to typing or app content. Neither operation moves the hardware
 pointer.
 
-The compact `text` field in app state is the normal model input. It contains
-line-numbered elements; use the leading number as `element_index` for `click`,
-`set_value`, and element-targeted `scroll`. Treat indexes as invalid after any
-action that could change UI structure, focus, or selection.
+The compact `text` field is full on the first observation and a `+`/`~`/`-`
+hierarchy diff thereafter. `stateRevision` and `baseRevision` identify the
+relationship. Use the leading stable number as `element_index` for indexed
+actions. If the model no longer has the base state, call `get_app_state` with
+`disableDiff: true`.
+
+When Screen Recording is available, translate `screenshot.image.dataBase64`
+into the model runtime's native image-content block and remove the bytes from
+structured JSON. When it is unavailable, keep using the returned Accessibility
+state and surface `screenshotError` only when vision is actually required.
 
 Use `type_text` for browser address bars, rich web editors, and other controls
 where ordinary keyboard typing is expected. Use `set_value` only for ordinary
 settable accessibility controls. Keep raw trees, structured element arrays,
 and debug fields opt-in because they can consume significant context.
 
-`type_text` requires an explicit app or pid. The Pilot fails closed if that app
-does not become active or loses Accessibility focus while text is being posted.
+Keyboard commands require an explicit app or pid and post events directly to
+that process. The Pilot stops delivery if the process exits; foreground focus
+is required only for physical mouse clicks and drags.
 
 ## App responsibilities
 
@@ -142,9 +157,10 @@ does not become active or loses Accessibility focus while text is being posted.
 | User consent and action approval | Enforces product policy | Reports trust and performs requested action |
 | Tool availability | Controls model discovery | Does not advertise tools |
 | Context budgets and retention | Caps, sanitizes, and expires UI state | Accepts explicit traversal limits |
-| Process lifetime | Chooses one-shot or persistent process | Serves requests until stdin closes |
+| Process lifetime | Keeps one process per active Computer Use session | Owns stable IDs and diff state until stdin closes |
 | Packaging and signing | Uses a product-named, signed bundle | Remains product-neutral |
 
-Do not store raw UI snapshots as durable agent memory. They are ephemeral,
-potentially sensitive, and their element indexes go stale. Keep only the state
-needed for the current tool loop, then require a fresh inspection.
+Do not store raw UI snapshots or screenshots as durable agent memory. They are
+ephemeral and potentially sensitive. Keep a reconstructable full baseline plus
+the newest diff only for the active tool loop, and force a full observation if
+that baseline is no longer present.

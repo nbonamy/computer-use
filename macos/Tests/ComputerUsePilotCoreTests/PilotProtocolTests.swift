@@ -185,18 +185,18 @@ final class PilotProtocolTests: XCTestCase {
     _ = pilot.handle(PilotRequest(
       id: "background-state",
       command: "get_app_state",
-      arguments: ["showCursor": .bool(false)]
+      arguments: ["showCursor": .bool(false), "includeScreenshot": .bool(false)]
     ))
 
     XCTAssertEqual(presentationCount, 0)
   }
 
   func testDecodesRequestWithArguments() throws {
-    let data = #"{"id":"abc","command":"snapshot","arguments":{"maxDepth":2,"app":"Finder"}}"#.data(using: .utf8)!
+    let data = #"{"id":"abc","command":"get_app_state","arguments":{"maxDepth":2,"app":"Finder"}}"#.data(using: .utf8)!
     let request = try JSONDecoder().decode(PilotRequest.self, from: data)
 
     XCTAssertEqual(request.id, "abc")
-    XCTAssertEqual(request.command, "snapshot")
+    XCTAssertEqual(request.command, "get_app_state")
     XCTAssertEqual(request.arguments["maxDepth"]?.intValue, 2)
     XCTAssertEqual(request.arguments["app"]?.stringValue, "Finder")
   }
@@ -237,12 +237,11 @@ final class PilotProtocolTests: XCTestCase {
     }
   }
 
-  func testDecodesPerformRequestWithSnapshotPath() throws {
-    let data = #"{"id":"path-1","command":"perform","arguments":{"action":"type_text","path":"root.children[0].children[1]","text":"hello"}}"#.data(using: .utf8)!
+  func testDecodesSelectTextRequestWithElementPath() throws {
+    let data = #"{"id":"path-1","command":"select_text","arguments":{"path":"root.children[0].children[1]","text":"hello"}}"#.data(using: .utf8)!
     let request = try JSONDecoder().decode(PilotRequest.self, from: data)
 
-    XCTAssertEqual(request.command, "perform")
-    XCTAssertEqual(request.arguments["action"]?.stringValue, "type_text")
+    XCTAssertEqual(request.command, "select_text")
     XCTAssertEqual(request.arguments["path"]?.stringValue, "root.children[0].children[1]")
     XCTAssertEqual(request.arguments["text"]?.stringValue, "hello")
   }
@@ -296,7 +295,18 @@ final class PilotProtocolTests: XCTestCase {
     XCTAssertEqual(response.ok, true)
     XCTAssertNotNil(response.result?.objectValue?["accessibilityTrusted"]?.boolValue)
     XCTAssertNotNil(response.result?.objectValue?["screenCaptureTrusted"]?.boolValue)
-    XCTAssertEqual(response.result?.objectValue?["protocol"]?.stringValue, "computer-use-pilot.v1")
+    XCTAssertEqual(response.result?.objectValue?["version"]?.stringValue, "2.0.0")
+    XCTAssertNil(response.result?.objectValue?["protocol"])
+  }
+
+  @MainActor
+  func testRemovedLegacyCommandsAreUnknown() {
+    let pilot = AccessibilityPilot(initialCursorPresenter: {})
+    for command in ["focused", "snapshot", "perform"] {
+      let response = pilot.handle(PilotRequest(id: command, command: command))
+      XCTAssertFalse(response.ok)
+      XCTAssertEqual(response.error?.code, "unknown_command")
+    }
   }
 }
 
