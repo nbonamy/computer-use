@@ -31,14 +31,14 @@ Optional `--output /absolute/path` selects the output directory. The command pri
 
 Every request has an `id`, `command`, and optional `arguments`. Every response repeats the `id` and has either `ok: true` with `result`, or `ok: false` with a stable structured error.
 
-`status` reports the release version as `2.0.0`. This is diagnostic product
+`status` reports the release version as `2.0.1`. This is diagnostic product
 metadata, not a negotiated protocol version: a consumer ships the exact helper
 binary and adapter it was built against as one release unit.
 
 The public command surface is:
 
 - `status`, `request_accessibility`, `request_screen_capture`
-- `list_apps`, `find_apps`, `launch_app`, `focus_app`
+- `list_apps`, `list_windows`, `find_apps`, `launch_app`, `focus_app`
 - `screenshot`
 - `get_app_state`, `click`, `dismiss`, `type_text`, `set_value`, `scroll`
 - `press_key`, `drag`, `perform_secondary_action`, `paste`, `select_text`
@@ -62,10 +62,43 @@ own the inactivity timeout and end the session by terminating the helper.
 Screenshots temporarily hide an existing halo during capture and restore it
 afterward without triggering a new halo.
 
-`status`, `request_accessibility`, `request_screen_capture`, `screenshot`,
+`status`, `request_accessibility`, `request_screen_capture`,
 `find_apps`, and `launch_app` do not require Accessibility access. Inspection
 and mutation commands do. Screenshot capture instead requires macOS Screen
-Recording permission.
+Recording permission. Window screenshots additionally require Accessibility
+access to resolve the exact selected window; full-screen capture does not.
+
+### Window targeting
+
+`list_windows` accepts an app selector and returns `app`, `success`, and
+`windows`: entries with `window_id`, `title`, `frame`, `is_key`, and
+`is_minimized`. IDs are positive integers local to this helper session, distinct
+from element indexes and native screenshot window IDs. Listing does not change
+the selected window. `list_apps` is unchanged.
+
+`get_app_state`, window `screenshot`, `focus_app`, and all actions require
+an explicit positive integer `window_id` from `list_windows`. Missing or malformed
+IDs return `invalid_request` before any action occurs. There is no implicit
+current-window or remembered-window fallback. After creating a new window, call
+`list_windows` and explicitly select its ID.
+A closed or foreign window returns `window_not_found`; it never falls back.
+
+Application observations now traverse only the selected window, return its
+`window_id`, and use that same window for the header, metadata, and screenshot.
+Subtrees must belong to it. Diff baselines are separate per window. Capture
+matches the window's title and bounds in ScreenCaptureKit; an ambiguous or missing
+match returns a screenshot error rather than capturing a different window.
+Read-only menu-bar inspection remains app-wide, needs no `window_id`, and omits
+window screenshots. Menu actions still require `window_id` and select that
+window before invoking the app-wide menu, since menu commands can affect it.
+Discovery, app launch, permission checks, and full-screen screenshots do not
+require a window ID.
+
+AX element actions remain usable in the background. Cross-window element or
+coordinate targets return `window_mismatch`. Keyboard input selects and verifies
+the requested window's keyboard focus before delivery, returning
+`window_focus_failed` if selection fails. This can raise the window. Physical
+clicks, drags, and unindexed scrolling additionally activate the app.
 
 `screenshot` accepts `scope: "window" | "screen"`. Window capture is the
 default and accepts the standard optional app selector (`app`, `pid`, or the
@@ -79,7 +112,7 @@ text and, by default, a target-window screenshot. A missing Screen Recording
 permission does not fail Accessibility inspection: `screenshot` is `null` and
 `screenshotError` explains why. Pass `includeScreenshot: false` to skip capture.
 
-The first observation for an app, scope, subtree root, and traversal-budget
+The first observation for an app, window, scope, subtree root, and traversal-budget
 combination is a full hierarchy. Later observations are diffs by default:
 
 - `+` means added.
@@ -103,10 +136,11 @@ one second and then waits for the app's Accessibility busy state to clear, up
 to five seconds total. This lets callers inspect settled UI without duplicating
 fixed delays in every adapter.
 
-`type_text`, `press_key`, and `paste` require an explicit app or pid. Keyboard
-events are posted directly to that process rather than the global event stream,
-so the app need not be frontmost. The helper stops if the target process exits
-during delivery. Consumers should use `set_value` for
+Pass the app selector and selected `window_id` to `type_text`, `press_key`, and
+`paste`. Keyboard events are posted directly to that process after verifying
+the selected window's keyboard focus. Window selection may raise the window;
+typing stops if that window loses focus or the process exits during delivery.
+Consumers should use `set_value` for
 ordinary settable controls and reserve synthetic typing for controls that need
 keyboard semantics.
 

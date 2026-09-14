@@ -9,7 +9,7 @@ protocol ScreenCapturing {
 
   func requestAccess() -> Bool
   func captureScreen(displayID: CGDirectDisplayID?) throws -> JSONValue
-  func captureWindow(application: NSRunningApplication) throws -> JSONValue
+  func captureWindow(application: NSRunningApplication, target: WindowCaptureTarget) throws -> JSONValue
 }
 
 @MainActor
@@ -44,15 +44,16 @@ final class MacScreenCapturer: ScreenCapturing {
     ])
   }
 
-  func captureWindow(application: NSRunningApplication) throws -> JSONValue {
+  func captureWindow(application: NSRunningApplication, target: WindowCaptureTarget) throws -> JSONValue {
     try requireAccess()
     let content = try shareableContent()
-    guard let window = content.windows.first(where: {
+    let matches = content.windows.filter {
       $0.owningApplication?.processID == application.processIdentifier
         && $0.windowLayer == 0
-        && $0.isOnScreen
-    }) else {
-      throw PilotRuntimeError(code: "window_not_found", message: "Could not find a visible window for the target app.")
+        && target.matches(title: $0.title, bounds: $0.frame)
+    }
+    guard matches.count == 1, let window = matches.first else {
+      throw PilotRuntimeError(code: "window_capture_ambiguous", message: "Cannot uniquely match the selected accessibility window for capture. No other window was captured.")
     }
     let filter = SCContentFilter(desktopIndependentWindow: window)
     let image = try captureImage(filter: filter)
@@ -62,6 +63,7 @@ final class MacScreenCapturer: ScreenCapturing {
       "app": runningApplicationDescription(application),
       "image": try imageDescription(image, logicalWidth: bounds.width),
       "scope": .string("window"),
+      "window_id": .number(Double(target.windowID)),
       "success": .bool(true),
       "window": .object([
         "bounds": rectDescription(bounds),
@@ -82,7 +84,7 @@ final class MacScreenCapturer: ScreenCapturing {
 
   private func shareableContent() throws -> SCShareableContent {
     let result = CallbackResultBox<SCShareableContent>()
-    SCShareableContent.getExcludingDesktopWindows(false, onScreenWindowsOnly: true) { content, error in
+    SCShareableContent.getExcludingDesktopWindows(false, onScreenWindowsOnly: false) { content, error in
       result.complete(value: content, error: error)
     }
     do {

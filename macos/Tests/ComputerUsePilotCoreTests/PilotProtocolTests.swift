@@ -5,14 +5,47 @@ import XCTest
 
 final class PilotProtocolTests: XCTestCase {
   @MainActor
-  func testScreenshotDefaultsToTheTargetWindow() {
+  func testAmbiguousCommandsRejectMissingWindowBeforeAnySideEffects() {
+    var cursorCount = 0
     let capturer = FakeScreenCapturer()
-    let pilot = AccessibilityPilot(initialCursorPresenter: {}, screenCapturer: capturer)
+    let pilot = AccessibilityPilot(initialCursorPresenter: { cursorCount += 1 }, screenCapturer: capturer)
+    let commands = ["get_app_state", "screenshot", "focus_app", "click", "dismiss",
+      "type_text", "press_key", "drag", "perform_secondary_action", "paste",
+      "select_text", "set_value", "scroll"]
+    for command in commands {
+      for scope in ["application", "menu_bar"] {
+        if command == "get_app_state" && scope == "menu_bar" { continue }
+        let result = pilot.handle(PilotRequest(id: command, command: command,
+          arguments: ["accessibilityScope": .string(scope)]))
+        XCTAssertFalse(result.ok, command)
+        XCTAssertEqual(result.error?.code, "invalid_request", command)
+        XCTAssertTrue(result.error?.message.contains("window_id is required") == true, command)
+      }
+    }
+    XCTAssertEqual(cursorCount, 0)
+    XCTAssertTrue(capturer.windowProcessIdentifiers.isEmpty)
+  }
+
+  @MainActor
+  func testWindowIDMustBeAPositiveInteger() {
+    let pilot = AccessibilityPilot(initialCursorPresenter: {})
+    for value: JSONValue in [.null, .number(0), .number(-1), .number(1.5), .string("1"), .number(1e100)] {
+      let result = pilot.handle(PilotRequest(id: "invalid-window", command: "press_key", arguments: ["window_id": value]))
+      XCTAssertFalse(result.ok)
+      XCTAssertEqual(result.error?.code, "invalid_request")
+    }
+  }
+
+  @MainActor
+  func testScreenshotUsesTheExplicitWindow() {
+    let capturer = FakeScreenCapturer()
     let pid = try! XCTUnwrap(NSWorkspace.shared.frontmostApplication).processIdentifier
+    let pilot = AccessibilityPilot(initialCursorPresenter: {}, screenCapturer: capturer, windowTargets: fakeWindowTargets(pid: pid))
 
     let response = pilot.handle(PilotRequest(
       id: "window-shot",
-      command: "screenshot"
+      command: "screenshot",
+      arguments: ["pid": .number(Double(pid)), "window_id": .number(1)]
     ))
 
     XCTAssertTrue(response.ok)
@@ -44,17 +77,17 @@ final class PilotProtocolTests: XCTestCase {
       $0.bundleIdentifier != nil && $0.bundleURL != nil && !$0.isTerminated
     }))
     let capturer = FakeScreenCapturer()
-    let pilot = AccessibilityPilot(initialCursorPresenter: {}, screenCapturer: capturer)
+    let pilot = AccessibilityPilot(initialCursorPresenter: {}, screenCapturer: capturer, windowTargets: fakeWindowTargets(pid: app.processIdentifier))
 
     let byBundle = pilot.handle(PilotRequest(
       id: "bundle-shot",
       command: "screenshot",
-      arguments: ["bundleIdentifier": .string(try XCTUnwrap(app.bundleIdentifier))]
+      arguments: ["bundleIdentifier": .string(try XCTUnwrap(app.bundleIdentifier)), "window_id": .number(1)]
     ))
     let byPath = pilot.handle(PilotRequest(
       id: "path-shot",
       command: "screenshot",
-      arguments: ["path": .string(try XCTUnwrap(app.bundleURL).path)]
+      arguments: ["path": .string(try XCTUnwrap(app.bundleURL).path), "window_id": .number(1)]
     ))
 
     XCTAssertTrue(byBundle.ok)
@@ -228,7 +261,7 @@ final class PilotProtocolTests: XCTestCase {
 
     for pid in [JSONValue.number(1e100), .number(Double(Int32.max) + 1)] {
       let response = pilot.handle(
-        PilotRequest(id: "invalid-pid", command: "focus_app", arguments: ["pid": pid])
+        PilotRequest(id: "invalid-pid", command: "focus_app", arguments: ["pid": pid, "window_id": .number(1)])
       )
 
       XCTAssertEqual(response.ok, true)
@@ -295,7 +328,7 @@ final class PilotProtocolTests: XCTestCase {
     XCTAssertEqual(response.ok, true)
     XCTAssertNotNil(response.result?.objectValue?["accessibilityTrusted"]?.boolValue)
     XCTAssertNotNil(response.result?.objectValue?["screenCaptureTrusted"]?.boolValue)
-    XCTAssertEqual(response.result?.objectValue?["version"]?.stringValue, "2.0.0")
+    XCTAssertEqual(response.result?.objectValue?["version"]?.stringValue, "2.0.1")
     XCTAssertNil(response.result?.objectValue?["protocol"])
   }
 
@@ -334,11 +367,32 @@ private final class FakeScreenCapturer: ScreenCapturing {
     return .object(["scope": .string("screen"), "success": .bool(true)])
   }
 
-  func captureWindow(application: NSRunningApplication) throws -> JSONValue {
+  func captureWindow(application: NSRunningApplication, target: WindowCaptureTarget) throws -> JSONValue {
     onCapture()
     windowProcessIdentifiers.append(application.processIdentifier)
     return .object(["scope": .string("window"), "success": .bool(true)])
   }
+}
+
+@MainActor
+private func fakeWindowTargets(pid: pid_t) -> WindowTargeting {
+  let window = AXUIElementCreateSystemWide()
+  let targeting = WindowTargeting(attributeReader: { _, attribute in
+    switch attribute {
+    case kAXWindowsAttribute: return [window] as CFArray
+    case kAXFocusedWindowAttribute: return window
+    case kAXTitleAttribute: return "Test window" as CFString
+    case kAXPositionAttribute:
+      var point = CGPoint(x: 10, y: 20)
+      return AXValueCreate(.cgPoint, &point)
+    case kAXSizeAttribute:
+      var size = CGSize(width: 800, height: 600)
+      return AXValueCreate(.cgSize, &size)
+    default: return nil
+    }
+  })
+  _ = targeting.list(app: AXUIElementCreateApplication(pid), pid: pid)
+  return targeting
 }
 
 @MainActor

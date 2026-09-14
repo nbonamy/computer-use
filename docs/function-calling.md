@@ -36,6 +36,7 @@ commands. Each tool maps to one Pilot method.
 | `computer_use_request_screen_recording` | `request_screen_capture` | Ask macOS for Screen Recording trust. | none |
 | `computer_use_screenshot` | `screenshot` | Capture a target window or an entire display as PNG image content. | `scope?`, app selector, `displayId?` |
 | `computer_use_list_apps` | `list_apps` | List running apps before choosing a target. | none |
+| `computer_use_list_windows` | `list_windows` | List an app's windows and stable window IDs. | app selector |
 | `computer_use_find_apps` | `find_apps` | Find an installed app that is not running. | `query?`, `bundleIdentifier?`, `maxResults?` |
 | `computer_use_launch_app` | `launch_app` | Start an app. | `bundleIdentifier?`, `path?`, `activate?` |
 | `computer_use_focus_app` | `focus_app` | Bring a running app forward. | `app?`, `bundleIdentifier?`, `pid?` |
@@ -52,6 +53,24 @@ commands. Each tool maps to one Pilot method.
 | `computer_use_select_text` | `select_text` | Select matching text or place the insertion cursor. | app selector, `element_index`, `text`, optional context and selection type |
 
 The function tools should expose only the arguments meaningful to the agent.
+Require positive integer `window_id` on window state, window screenshot, focus,
+and action tools (including menu actions). Preserve the explicit ID in follow-up
+observations. `list_windows`
+returns `app`, `success`, and `windows` with `window_id`, `title`, `frame`,
+`is_key`, and `is_minimized`; `list_apps` remains unchanged.
+
+State now describes a single selected window and returns `window_id`. IDs live
+for the helper session and are not `element_index` or native screenshot IDs.
+Omitting an ID returns `invalid_request`; there is no current-window or
+remembered-window fallback. After creating/closing windows,
+refresh `list_windows` and select explicitly. Handle `window_not_found`,
+`window_mismatch`, and `window_focus_failed` by refreshing the target, never by
+silently retrying against a different window. A window screenshot requires AX
+access and may return `window_capture_ambiguous` if its exact capture cannot be
+resolved. Read-only menu-bar observations remain app-wide, require no window ID,
+and omit screenshots. Full-screen screenshots and app discovery/launch likewise
+need no window ID. Menu actions require and focus their explicit window target.
+
 They can also accept product-only arguments, such as
 `getAppStateAfterMs`; the adapter must remove those before issuing the Pilot
 request and can return a follow-up `get_app_state` result to the agent.
@@ -67,12 +86,15 @@ Pilot command, and writes exactly one JSON line to stdin:
   "command": "get_app_state",
   "arguments": {
     "app": "Safari",
+    "window_id": 1,
     "maxDepth": 12,
     "maxNodes": 3000,
     "maxTextCharacters": 30000
   }
 }
 ```
+
+The example window ID must come from `list_windows` in the same helper session.
 
 The Pilot response repeats `id` and is either successful:
 

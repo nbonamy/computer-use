@@ -36,6 +36,7 @@ public final class AccessibilityPilot {
   private let screenCapturer: ScreenCapturing
   private let targetAccessibilitySupport: TargetAccessibilitySupport
   private let stateHistory = AccessibilityStateHistory()
+  private let windowTargets: WindowTargeting
   private var elementBuckets: [CFHashCode: [(index: Int, element: AXUIElement)]] = [:]
   private var latestObservedElementIDsByPID: [pid_t: Set<Int>] = [:]
   private var nextElementIndex = 0
@@ -46,6 +47,7 @@ public final class AccessibilityPilot {
     self.cursorOverlay = cursorOverlay
     self.initialCursorPresenter = { cursorOverlay.showAtMainScreenCenter() }
     self.screenCapturer = MacScreenCapturer()
+    self.windowTargets = WindowTargeting()
     self.targetAccessibilitySupport = TargetAccessibilitySupport()
   }
 
@@ -53,15 +55,26 @@ public final class AccessibilityPilot {
     cursorOverlay: any ComputerUseCursorPresenting = ComputerUseCursorOverlay(),
     initialCursorPresenter: @escaping () -> Void,
     screenCapturer: ScreenCapturing = MacScreenCapturer(),
-    targetAccessibilitySupport: TargetAccessibilitySupport = TargetAccessibilitySupport()
+    targetAccessibilitySupport: TargetAccessibilitySupport = TargetAccessibilitySupport(),
+    windowTargets: WindowTargeting = WindowTargeting()
   ) {
     self.cursorOverlay = cursorOverlay
     self.initialCursorPresenter = initialCursorPresenter
     self.screenCapturer = screenCapturer
+    self.windowTargets = windowTargets
     self.targetAccessibilitySupport = targetAccessibilitySupport
   }
 
   public func handle(_ request: PilotRequest) -> PilotResponse {
+    do {
+      if requiresWindowID(request) {
+        _ = try requiredWindowID(request.arguments)
+      }
+    } catch let error as PilotRuntimeError {
+      return .failure(id: request.id, code: error.code, message: error.message)
+    } catch {
+      return .failure(id: request.id, code: "invalid_request", message: error.localizedDescription)
+    }
     if request.command != "screenshot" && request.arguments["showCursor"]?.boolValue != false {
       presentInitialCursorIfNeeded()
     }
@@ -78,6 +91,8 @@ public final class AccessibilityPilot {
       return runtimeGuard(id: request.id) { try screenshot(arguments: request.arguments) }
     case "list_apps":
       return .success(id: request.id, result: listApps())
+    case "list_windows":
+      return accessibilityGuard(id: request.id) { try listWindows(arguments: request.arguments) }
     case "find_apps":
       return runtimeGuard(id: request.id) { try findApps(arguments: request.arguments) }
     case "launch_app":
@@ -119,6 +134,27 @@ public final class AccessibilityPilot {
     initialCursorPresenter()
   }
 
+  private func requiresWindowID(_ request: PilotRequest) -> Bool {
+    switch request.command {
+    case "get_app_state":
+      return request.arguments["accessibilityScope"]?.stringValue != "menu_bar"
+    case "screenshot":
+      return (request.arguments["scope"]?.stringValue ?? "window") == "window"
+    case "focus_app", "click", "dismiss", "type_text", "press_key", "drag",
+         "perform_secondary_action", "paste", "select_text", "set_value", "scroll":
+      return true
+    default:
+      return false
+    }
+  }
+
+  private func requiredWindowID(_ arguments: [String: JSONValue]) throws -> Int {
+    guard let id = try optionalIntegerArgument(arguments, "window_id", minimum: 1) else {
+      throw PilotRuntimeError(code: "invalid_request", message: "window_id is required. Call list_windows for the target app first.")
+    }
+    return id
+  }
+
   private func accessibilityGuard(id: String?, operation: () throws -> JSONValue) -> PilotResponse {
     guard AXIsProcessTrusted() else {
       return .failure(
@@ -153,6 +189,10 @@ public final class AccessibilityPilot {
     operation: () throws -> JSONValue
   ) -> PilotResponse {
     accessibilityGuard(id: id) {
+      _ = try selectedWindow(arguments: arguments)
+      if arguments["accessibilityScope"]?.stringValue == "menu_bar" {
+        _ = try prepareKeyboardTarget(arguments: arguments)
+      }
       let result = try operation()
       if let app = try? runningApplication(arguments: arguments) {
         pendingSettleAtByPID[app.processIdentifier] = Date()
@@ -166,7 +206,7 @@ public final class AccessibilityPilot {
       "accessibilityTrusted": .bool(AXIsProcessTrusted()),
       "screenCaptureTrusted": .bool(screenCapturer.isTrusted),
       "platform": .string("macos"),
-      "version": .string("2.0.0"),
+      "version": .string("2.0.1"),
       "success": .bool(true)
     ])
   }
@@ -184,7 +224,10 @@ public final class AccessibilityPilot {
     let scope = arguments["scope"]?.stringValue ?? "window"
     switch scope {
     case "window":
-      return try screenCapturer.captureWindow(application: runningApplication(arguments: arguments))
+      let app = try runningApplication(arguments: arguments)
+      let window = try selectedWindow(arguments: arguments)
+      return try screenCapturer.captureWindow(application: app,
+        target: windowTargets.captureTarget(window.element, id: window.id))
     case "screen":
       return try screenCapturer.captureScreen(displayID: try displayIdentifierArgument(arguments))
     default:
@@ -255,6 +298,28 @@ public final class AccessibilityPilot {
         ])
       }
     return .object(["apps": .array(apps), "success": .bool(true)])
+  }
+
+  private func listWindows(arguments: [String: JSONValue]) throws -> JSONValue {
+    let app = try runningApplication(arguments: arguments)
+    let root = preparedRootElement(processIdentifier: app.processIdentifier)
+    return .object(["success": .bool(true), "app": runningApplicationDescription(app),
+      "windows": .array(windowTargets.list(app: root, pid: app.processIdentifier))])
+  }
+
+  private func selectedWindow(arguments: [String: JSONValue]) throws -> (id: Int, element: AXUIElement) {
+    let app = try runningApplication(arguments: arguments)
+    let requested = try requiredWindowID(arguments)
+    return try windowTargets.resolve(app: preparedRootElement(processIdentifier: app.processIdentifier),
+      pid: app.processIdentifier, requested: requested)
+  }
+
+  private func validateWindow(_ element: AXUIElement, arguments: [String: JSONValue]) throws {
+    if arguments["accessibilityScope"]?.stringValue == "menu_bar" { return }
+    let window = try selectedWindow(arguments: arguments)
+    guard windowTargets.contains(element, window: window.element) else {
+      throw PilotRuntimeError(code: "window_mismatch", message: "Element does not belong to the selected window. Observe the intended window_id first.")
+    }
   }
 
   private func findApps(arguments: [String: JSONValue]) throws -> JSONValue {
@@ -348,9 +413,8 @@ public final class AccessibilityPilot {
           "success": .bool(false)
         ])
       }
-      let app = try runningApplication(arguments: arguments)
-      let activated = activate(app)
-      waitForActivation(app)
+      let app = try prepareKeyboardTarget(arguments: arguments, foreground: true)
+      let activated = app.isActive
       return .object([
         "activated": .bool(activated),
         "app": .object([
@@ -429,6 +493,7 @@ public final class AccessibilityPilot {
     let historyKeyParts: [String] = [
       String(app.processIdentifier),
       arguments["accessibilityScope"]?.stringValue ?? "application",
+      String(stableElementIndex(for: appRoot)),
       arguments["rootElementIndex"]?.stringValue ?? "root",
       depthKey,
       nodeKey
@@ -470,14 +535,20 @@ public final class AccessibilityPilot {
     if let baseRevision = stateRender.baseRevision, !diffWasTruncated {
       result["baseRevision"] = .number(Double(baseRevision))
     }
+    if !includeMacChrome {
+      let window = try selectedWindow(arguments: arguments)
+      result["window_id"] = .number(Double(window.id))
+      result["window"] = windowTargets.description(window.element, id: window.id)
+    }
     if arguments["includeContextSnapshot"]?.boolValue == true {
       result["contextSnapshot"] = .object(["text": .string(stateRender.fullText)])
     }
-    if arguments["includeScreenshot"]?.boolValue != false {
+    if arguments["includeScreenshot"]?.boolValue != false && !includeMacChrome {
       do {
         result["screenshot"] = try screenshot(arguments: [
           "pid": .number(Double(app.processIdentifier)),
-          "scope": .string("window")
+          "scope": .string("window"),
+          "window_id": result["window_id"] ?? .null
         ])
       } catch let error as PilotRuntimeError {
         result["screenshot"] = .null
@@ -513,10 +584,10 @@ public final class AccessibilityPilot {
   }
 
   private func click(arguments: [String: JSONValue]) throws -> JSONValue {
-    try activateAppIfRequested(arguments: arguments)
     let clickCount = try optionalIntegerArgument(arguments, "click_count", minimum: 1) ?? 1
     let mouseButton = try mouseButtonArgument(arguments)
     let physical = physicalClickRequested(arguments) || mouseButton != .left
+    if physical { _ = try prepareKeyboardTarget(arguments: arguments, foreground: true) }
 
     if let element = try actionElement(arguments: arguments) {
       if physical {
@@ -548,6 +619,10 @@ public final class AccessibilityPilot {
     }
 
     let point = try coordinatePoint(arguments: arguments)
+    let window = try selectedWindow(arguments: arguments)
+    guard windowTargets.bounds(window.element)?.contains(point) == true else {
+      throw PilotRuntimeError(code: "window_mismatch", message: "Click coordinates are outside the selected window.")
+    }
     // Show the intended Computer Use position even when the coordinate does
     // not resolve to an actionable Accessibility element. This keeps the
     // software cursor useful for previews and makes failed actions observable.
@@ -562,7 +637,13 @@ public final class AccessibilityPilot {
       )
       method = "cg_mouse_click"
     } else {
-      method = try activateElement(at: point, clickCount: clickCount)
+      let root = try rootElement(arguments: arguments)
+      var hit: AXUIElement?
+      guard AXUIElementCopyElementAtPosition(root, Float(point.x), Float(point.y), &hit) == .success, let hit else {
+        throw PilotRuntimeError(code: "element_not_found", message: "No element at the requested coordinates.")
+      }
+      try validateWindow(hit, arguments: arguments)
+      method = try activateElement(hit, clickCount: clickCount)
     }
 
     return .object([
@@ -593,8 +674,8 @@ public final class AccessibilityPilot {
       throw PilotRuntimeError(code: "invalid_request", message: "type_text requires app or pid.")
     }
 
-    let app = try runningApplication(arguments: arguments)
-    try postKeyboardText(text, targetPID: app.processIdentifier)
+    let app = try prepareKeyboardTarget(arguments: arguments)
+    try postKeyboardText(text, targetPID: app.processIdentifier, arguments: arguments)
     return .object([
       "charactersTyped": .number(Double(text.count)),
       "success": .bool(true)
@@ -617,9 +698,11 @@ public final class AccessibilityPilot {
   private func drag(arguments: [String: JSONValue]) throws -> JSONValue {
     let from = try coordinatePoint(arguments: arguments, xName: "from_x", yName: "from_y")
     let to = try coordinatePoint(arguments: arguments, xName: "to_x", yName: "to_y")
-    let app = try runningApplication(arguments: arguments)
-    _ = activate(app)
-    waitForActivation(app)
+    let app = try prepareKeyboardTarget(arguments: arguments, foreground: true)
+    let window = try selectedWindow(arguments: arguments)
+    guard let bounds = windowTargets.bounds(window.element), bounds.contains(from), bounds.contains(to) else {
+      throw PilotRuntimeError(code: "window_mismatch", message: "Drag coordinates must stay within the selected window.")
+    }
     guard app.isActive else {
       throw PilotRuntimeError(code: "action_unavailable", message: "Unable to drag because the requested app did not become active.")
     }
@@ -774,6 +857,11 @@ public final class AccessibilityPilot {
       ])
     }
 
+    _ = try prepareKeyboardTarget(arguments: arguments, foreground: true)
+    let window = try selectedWindow(arguments: arguments)
+    let original = CGEvent(source: nil)?.location ?? .zero
+    defer { CGWarpMouseCursorPosition(original) }
+    CGWarpMouseCursorPosition(try centerPoint(of: window.element))
     postScroll(direction: direction, pages: pages)
     return .object([
       "direction": .string(direction),
@@ -783,27 +871,12 @@ public final class AccessibilityPilot {
   }
 
   private func rootElement(arguments: [String: JSONValue]) throws -> AXUIElement {
-    let appRoot: AXUIElement
-    if let pid = try processIdentifierArgument(arguments) {
-      guard NSWorkspace.shared.runningApplications.contains(where: { $0.processIdentifier == pid && !$0.isTerminated }) else {
-        throw PilotRuntimeError(code: "app_not_found", message: "No running application has pid \(pid). Refresh app state and use its current pid.")
-      }
-      appRoot = preparedRootElement(processIdentifier: pid)
-    } else if let appName = arguments["app"]?.stringValue {
-      let app = NSWorkspace.shared.runningApplications.first {
-        $0.localizedName == appName || $0.bundleIdentifier == appName
-      }
-      guard let app else {
-        throw PilotRuntimeError(code: "app_not_found", message: "Could not find running app \(appName).")
-      }
-      appRoot = preparedRootElement(processIdentifier: app.processIdentifier)
-    } else {
-      appRoot = preparedRootElement(processIdentifier: try frontmostApplication().processIdentifier)
-    }
+    let app = try runningApplication(arguments: arguments)
+    let appRoot = preparedRootElement(processIdentifier: app.processIdentifier)
 
     switch arguments["accessibilityScope"]?.stringValue ?? "application" {
     case "application":
-      return appRoot
+      return try selectedWindow(arguments: arguments).element
     case "menu_bar":
       guard let menuBar = try? copyElementAttribute(appRoot, kAXMenuBarAttribute as String) else {
         throw PilotRuntimeError(code: "element_not_found", message: "The target application has no accessible menu bar.")
@@ -829,6 +902,7 @@ public final class AccessibilityPilot {
       return (appRoot, stableElementIndex(for: appRoot), "root", nil)
     }
     let element = try stableElement(at: rootElementIndex, arguments: arguments)
+    try validateWindow(element, arguments: arguments)
     return (element, rootElementIndex, "element[\(rootElementIndex)]", rootElementIndex)
   }
 
@@ -1824,6 +1898,9 @@ public final class AccessibilityPilot {
   }
 
   private func windowDescription(for appElement: AXUIElement) -> JSONValue {
+    if (windowTargets.attribute(appElement, kAXRoleAttribute) as? String) == kAXWindowRole {
+      return describeElement(appElement, path: "window")
+    }
     guard let window = try? copyElementAttribute(appElement, kAXFocusedWindowAttribute) else {
       return .null
     }
@@ -2042,10 +2119,14 @@ public final class AccessibilityPilot {
     }
   }
 
-  private func postKeyboardText(_ text: String, targetPID: pid_t) throws {
+  private func postKeyboardText(_ text: String, targetPID: pid_t, arguments: [String: JSONValue]) throws {
     let source = CGEventSource(stateID: .hidSystemState)
+    let window = try selectedWindow(arguments: arguments)
+    let appRoot = preparedRootElement(processIdentifier: targetPID)
     let input = TargetBoundKeyboardInput(
-      isTargetFocused: keyboardTargetIsRunning,
+      isTargetFocused: { [self] pid in
+        keyboardTargetIsRunning(pid) && windowTargets.isKeyboardTarget(window.element, app: appRoot)
+      },
       pauseBetweenCharacters: { usleep(5_000) },
       postCharacter: { [self] character in
         switch character {
@@ -2063,16 +2144,23 @@ public final class AccessibilityPilot {
     } catch TargetBoundKeyboardInputError.targetLostFocus {
       throw PilotRuntimeError(
         code: "action_unavailable",
-        message: "Unable to type because the requested app is no longer running."
+        message: "Typing stopped because the selected window lost keyboard focus or the app exited."
       )
     }
   }
 
-  private func prepareKeyboardTarget(arguments: [String: JSONValue]) throws -> NSRunningApplication {
-    guard arguments["app"] != nil || arguments["pid"] != nil else {
-      throw PilotRuntimeError(code: "invalid_request", message: "Keyboard actions require app or pid.")
+  private func prepareKeyboardTarget(arguments: [String: JSONValue], foreground: Bool = false) throws -> NSRunningApplication {
+    let app = try runningApplication(arguments: arguments)
+    let window = try selectedWindow(arguments: arguments)
+    if foreground {
+      _ = activate(app)
+      guard app.isActive else {
+        throw PilotRuntimeError(code: "window_focus_failed", message: "The selected app could not be brought to the foreground.")
+      }
     }
-    return try runningApplication(arguments: arguments)
+    let root = preparedRootElement(processIdentifier: app.processIdentifier)
+    try windowTargets.focus(window.element, app: root)
+    return app
   }
 
   private func postKeyboardChord(_ chord: KeyboardChord, targetPID: pid_t) {
@@ -2116,6 +2204,7 @@ public final class AccessibilityPilot {
     guard AXUIElementCopyAttributeValue(element, kAXRoleAttribute as CFString, &role) == .success else {
       throw PilotRuntimeError(code: "stale_element", message: "Element \(index) is no longer available. Call get_app_state again.")
     }
+    try validateWindow(element, arguments: arguments)
     return element
   }
 
