@@ -149,6 +149,42 @@ final class AccessibilityStateHistoryTests: XCTestCase {
     hierarchyRow(id, line, parent: nil, sibling: siblingIndex)
   }
 
+  func testDiffKeepsSharedAncestorsWithoutUnrelatedSiblings() {
+    let history = AccessibilityStateHistory()
+    let header = [String(repeating: "window context ", count: 50)]
+    let ancestors = [
+      hierarchyRow(1, "1 window", parent: nil, sibling: 0),
+      hierarchyRow(2, "  2 group Item", parent: 1, sibling: 0)
+    ]
+    let sibling = hierarchyRow(5, "  5 unrelated", parent: 1, sibling: 1)
+    _ = history.render(key: "app", header: header, rows: ancestors + [
+      hierarchyRow(3, "    3 text 0 in cart", parent: 2, sibling: 0), sibling
+    ], footer: [], disableDiff: false)
+    let result = history.render(key: "app", header: header, rows: ancestors + [
+      hierarchyRow(3, "    3 text 1 in cart", parent: 2, sibling: 0),
+      hierarchyRow(4, "    4 button Increase", parent: 2, sibling: 1), sibling
+    ], footer: [], disableDiff: false)
+
+    XCTAssertEqual(result.kind, "diff")
+    XCTAssertEqual(Array(result.text.split(separator: "\n").dropFirst(2)), [
+      "= 1 window", "=   2 group Item", "~     3 text 1 in cart", "+     4 button Increase"
+    ])
+  }
+
+  func testAncestorCyclesDoNotLoopAndChangedParentsAreNotContext() {
+    let history = AccessibilityStateHistory()
+    let header = [String(repeating: "window context ", count: 50)]
+    let rows = [hierarchyRow(1, "1 group", parent: 2, sibling: 0),
+                hierarchyRow(2, "2 text", parent: 1, sibling: 0)]
+    _ = history.render(key: "app", header: header, rows: rows, footer: [], disableDiff: false)
+    let result = history.render(key: "app", header: header, rows: [
+      hierarchyRow(1, "1 renamed group", parent: 2, sibling: 0), rows[1]
+    ], footer: [], disableDiff: false)
+    XCTAssertTrue(result.text.contains("~ 1 renamed group"))
+    XCTAssertTrue(result.text.contains("= 2 text"))
+    XCTAssertFalse(result.text.contains("= 1 renamed group"))
+  }
+
   private func hierarchyRow(_ id: Int, _ line: String, parent: Int?, sibling: Int) -> AccessibilityStateRow {
     AccessibilityStateRow(
       elementIndex: id,

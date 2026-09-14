@@ -151,11 +151,24 @@ Use the menu-bar accessibility scope to inspect native menus and `dismiss`
 before returning to typing or app content. Neither operation moves the hardware
 pointer.
 
-The compact `text` field is full on the first observation and a `+`/`~`/`-`
+The compact `text` field is full on the first observation and a contextual
 hierarchy diff thereafter. `stateRevision` and `baseRevision` identify the
 relationship. Use the leading stable number as `element_index` for indexed
 actions. If the model no longer has the base state, call `get_app_state` with
 `disableDiff: true`.
+
+Diffs include unchanged ancestors of added or changed rows with an `=` prefix.
+These rows provide structural context, not additional changes. Removed IDs
+are summarized separately and are no longer actionable. The helper may return
+a full hierarchy when that is smaller than the contextual diff.
+
+When narrowing observations, preserve the inspected group's labels, selected
+values, and actionable controls rather than emitting only matching text lines.
+The model decides task relevance; the helper preserves AX relationships and
+does not infer product cards or other task-specific groups. Use
+`rootElementIndex` for a known subtree and opt into `includeElements` or
+`includeTree` when structured relationships are needed. An action selector
+still targets only its matching element: context must never broaden an action.
 
 When Screen Recording is available, translate `screenshot.image.dataBase64`
 into the model runtime's native image-content block and remove the bytes from

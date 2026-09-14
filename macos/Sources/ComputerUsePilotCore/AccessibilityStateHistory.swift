@@ -73,6 +73,24 @@ final class AccessibilityStateHistory {
 
     let removedIDs = Set(previous.rows.filter { newByID[$0.elementIndex] == nil }.map(\.elementIndex)).sorted()
     if !removedIDs.isEmpty { changes.append("Removed IDs: \(compactIDRanges(removedIDs))") }
+    let changedIDs = Set(rows.compactMap { row -> Int? in
+      guard let old = oldByID[row.elementIndex] else { return row.elementIndex }
+      return old.line != row.line
+        || old.parentElementIndex != row.parentElementIndex
+        || old.siblingIndex != row.siblingIndex ? row.elementIndex : nil
+    })
+    // Preserve structural context, not inferred task relevance. Ancestors are
+    // emitted once, in tree order, and never presented as changed controls.
+    var contextIDs: Set<Int> = []
+    for id in changedIDs {
+      var parent = newByID[id]?.parentElementIndex
+      var visited: Set<Int> = [id]
+      while let parentID = parent, visited.insert(parentID).inserted,
+        let ancestor = newByID[parentID] {
+        contextIDs.insert(parentID)
+        parent = ancestor.parentElementIndex
+      }
+    }
     var emittedCurrentIDs: Set<Int> = []
     for row in rows {
       guard emittedCurrentIDs.insert(row.elementIndex).inserted else { continue }
@@ -84,12 +102,14 @@ final class AccessibilityStateHistory {
         || old.parentElementIndex != row.parentElementIndex
         || old.siblingIndex != row.siblingIndex {
         changes.append("~ \(row.line)")
+      } else if contextIDs.contains(row.elementIndex) {
+        changes.append("= \(row.line)")
       }
     }
 
     let diffHeader = [
       "Computer Use Accessibility diff revision \(revision) from \(previous.revision)",
-      "Prefixes: + added, ~ changed or moved. Removed IDs are no longer actionable."
+      "Prefixes: + added, ~ changed or moved, = unchanged ancestor context. Removed IDs are no longer actionable."
     ]
     let diffText = (diffHeader + (changes.isEmpty ? ["(no accessibility changes)"] : changes) + footer)
       .joined(separator: "\n")
