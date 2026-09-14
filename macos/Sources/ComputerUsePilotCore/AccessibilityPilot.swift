@@ -424,13 +424,16 @@ public final class AccessibilityPilot {
     if let focusedElementText {
       footer.append(focusedElementText)
     }
-    let historyKey = [
+    let depthKey = maxDepth.map { String($0) } ?? "unbounded"
+    let nodeKey = maxNodes.map { String($0) } ?? "unbounded"
+    let historyKeyParts: [String] = [
       String(app.processIdentifier),
       arguments["accessibilityScope"]?.stringValue ?? "application",
       arguments["rootElementIndex"]?.stringValue ?? "root",
-      maxDepth.map(String.init) ?? "unbounded",
-      maxNodes.map(String.init) ?? "unbounded"
-    ].joined(separator: ":")
+      depthKey,
+      nodeKey
+    ]
+    let historyKey = historyKeyParts.joined(separator: ":")
     let stateRender = stateHistory.render(
       key: historyKey,
       header: header,
