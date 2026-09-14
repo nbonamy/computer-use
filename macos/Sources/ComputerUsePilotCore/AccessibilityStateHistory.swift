@@ -71,10 +71,8 @@ final class AccessibilityStateHistory {
     }
     var changes: [String] = []
 
-    var removedIDs: Set<Int> = []
-    for row in previous.rows where newByID[row.elementIndex] == nil && removedIDs.insert(row.elementIndex).inserted {
-      changes.append("- \(row.line)")
-    }
+    let removedIDs = Set(previous.rows.filter { newByID[$0.elementIndex] == nil }.map(\.elementIndex)).sorted()
+    if !removedIDs.isEmpty { changes.append("Removed IDs: \(compactIDRanges(removedIDs))") }
     var emittedCurrentIDs: Set<Int> = []
     for row in rows {
       guard emittedCurrentIDs.insert(row.elementIndex).inserted else { continue }
@@ -91,10 +89,14 @@ final class AccessibilityStateHistory {
 
     let diffHeader = [
       "Computer Use Accessibility diff revision \(revision) from \(previous.revision)",
-      "Prefixes: + added, ~ changed or moved, - removed. Unprefixed elements remain unchanged."
+      "Prefixes: + added, ~ changed or moved. Removed IDs are no longer actionable."
     ]
     let diffText = (diffHeader + (changes.isEmpty ? ["(no accessibility changes)"] : changes) + footer)
       .joined(separator: "\n")
+
+    if !changes.isEmpty && diffText.count > fullText.count {
+      return AccessibilityStateRender(baseRevision: nil, fullText: fullText, kind: "full", revision: revision, text: fullText)
+    }
 
     return AccessibilityStateRender(
       baseRevision: previous.revision,
@@ -107,5 +109,19 @@ final class AccessibilityStateHistory {
 
   func reset() {
     baselines.removeAll()
+  }
+
+  private func compactIDRanges(_ ids: [Int]) -> String {
+    var ranges: [String] = []
+    var start = ids[0]
+    var end = start
+    for id in ids.dropFirst() {
+      if id == end + 1 { end = id; continue }
+      ranges.append(start == end ? "\(start)" : "\(start)-\(end)")
+      start = id
+      end = id
+    }
+    ranges.append(start == end ? "\(start)" : "\(start)-\(end)")
+    return ranges.joined(separator: ", ")
   }
 }

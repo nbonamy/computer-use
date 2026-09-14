@@ -5,6 +5,22 @@ import XCTest
 
 final class WindowTargetingTests: XCTestCase {
   @MainActor
+  func testBackgroundKeyboardSelectionDoesNotRaiseWindow() throws {
+    let app = AXUIElementCreateApplication(101)
+    let window = AXUIElementCreateApplication(102)
+    var focused = app
+    var raises = 0
+    let targeting = WindowTargeting(attributeReader: { _, name in
+      name == kAXFocusedWindowAttribute ? focused : nil
+    }, focusRequester: { focused = $0 }, raiseRequester: { _ in raises += 1 })
+    try targeting.focus(window, app: app)
+    XCTAssertEqual(raises, 0)
+    focused = app
+    try targeting.focus(window, app: app, allowRaise: true)
+    XCTAssertEqual(raises, 1)
+  }
+
+  @MainActor
   func testKeyboardFocusSelectsExactWindowAndVerifiesIt() throws {
     let first = AXUIElementCreateApplication(101)
     let second = AXUIElementCreateApplication(102)

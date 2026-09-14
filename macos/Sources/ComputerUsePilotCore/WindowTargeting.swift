@@ -44,11 +44,14 @@ final class WindowTargeting {
   private let selection = WindowSelection<AXUIElement>(equal: { CFEqual($0, $1) })
   private let attributeReader: ((AXUIElement, String) -> CFTypeRef?)?
   private let focusRequester: ((AXUIElement) -> Void)?
+  private let raiseRequester: ((AXUIElement) -> Void)?
 
   init(attributeReader: ((AXUIElement, String) -> CFTypeRef?)? = nil,
-       focusRequester: ((AXUIElement) -> Void)? = nil) {
+       focusRequester: ((AXUIElement) -> Void)? = nil,
+       raiseRequester: ((AXUIElement) -> Void)? = nil) {
     self.attributeReader = attributeReader
     self.focusRequester = focusRequester
+    self.raiseRequester = raiseRequester
   }
 
   func attribute(_ element: AXUIElement, _ name: String) -> CFTypeRef? {
@@ -127,7 +130,7 @@ final class WindowTargeting {
     elementAttribute(app, kAXFocusedWindowAttribute).map { CFEqual($0, window) } ?? false
   }
 
-  func focus(_ window: AXUIElement, app: AXUIElement) throws {
+  func focus(_ window: AXUIElement, app: AXUIElement, allowRaise: Bool = false) throws {
     if isKeyboardTarget(window, app: app) { return }
     if let focusRequester {
       focusRequester(window)
@@ -135,7 +138,10 @@ final class WindowTargeting {
       _ = AXUIElementSetAttributeValue(window, kAXMinimizedAttribute as CFString, kCFBooleanFalse)
       _ = AXUIElementSetAttributeValue(window, kAXMainAttribute as CFString, kCFBooleanTrue)
       _ = AXUIElementSetAttributeValue(window, kAXFocusedAttribute as CFString, kCFBooleanTrue)
-      _ = AXUIElementPerformAction(window, kAXRaiseAction as CFString)
+    }
+    if allowRaise {
+      if let raiseRequester { raiseRequester(window) }
+      else { _ = AXUIElementPerformAction(window, kAXRaiseAction as CFString) }
     }
     for _ in 0..<10 {
       if isKeyboardTarget(window, app: app) { return }

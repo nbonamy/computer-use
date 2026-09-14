@@ -70,6 +70,7 @@ public final class AccessibilityPilot {
       if requiresWindowID(request) {
         _ = try requiredWindowID(request.arguments)
       }
+      try PilotArguments.validate(command: request.command, arguments: request.arguments)
     } catch let error as PilotRuntimeError {
       return .failure(id: request.id, code: error.code, message: error.message)
     } catch {
@@ -442,8 +443,8 @@ public final class AccessibilityPilot {
 
   private func getAppState(arguments: [String: JSONValue]) throws -> JSONValue {
     let app = try runningApplication(arguments: arguments)
-    settleBeforeObservation(app: app)
     let appRoot = try rootElement(arguments: arguments)
+    let settling = settleBeforeObservation(app: app, root: appRoot, arguments: arguments)
     let includeElements = arguments["includeElements"]?.boolValue ?? false
     let includeTree = arguments["includeTree"]?.boolValue ?? false
     let includeDebug = arguments["includeDebug"]?.boolValue ?? false
@@ -458,7 +459,6 @@ public final class AccessibilityPilot {
     var elements: [JSONValue] = []
     var stateRows: [AccessibilityStateRow] = []
     var observedElementIDs: Set<Int> = []
-    var pendingSiblingLabel: String?
     let tree = indexedSnapshotElement(
       root,
       path: scopedRoot.path,
@@ -467,7 +467,6 @@ public final class AccessibilityPilot {
       siblingIndex: 0,
       parentRole: nil,
       includeMacChrome: includeMacChrome,
-      pendingSiblingLabel: &pendingSiblingLabel,
       maxDepth: maxDepth,
       remaining: &remaining,
       visitedCount: &visitedCount,
@@ -482,6 +481,9 @@ public final class AccessibilityPilot {
     let focusedElementText = focusedElement.objectValue.map { "Focused element: \(elementLine($0))" }
     let header = appStateHeader(app: app, root: appRoot)
     var footer: [String] = []
+    if settling?.objectValue?["timedOut"]?.boolValue == true {
+      footer.append("Observation wait timed out; requested readiness was not confirmed. Do not assume the previous action completed.")
+    }
     if isTraversalTruncated(remaining) {
       footer.append("Tree truncated. Re-run with a higher maxNodes value if needed.")
     }
@@ -494,7 +496,7 @@ public final class AccessibilityPilot {
       String(app.processIdentifier),
       arguments["accessibilityScope"]?.stringValue ?? "application",
       String(stableElementIndex(for: appRoot)),
-      arguments["rootElementIndex"]?.stringValue ?? "root",
+      scopedRoot.requestedIndex.map(String.init) ?? "root",
       depthKey,
       nodeKey
     ]
@@ -532,6 +534,7 @@ public final class AccessibilityPilot {
       "text": .string(text.value),
       "window": windowDescription(for: appRoot)
     ]
+    if let settling { result["settling"] = settling }
     if let baseRevision = stateRender.baseRevision, !diffWasTruncated {
       result["baseRevision"] = .number(Double(baseRevision))
     }
@@ -670,12 +673,38 @@ public final class AccessibilityPilot {
     guard let text = arguments["text"]?.stringValue else {
       throw PilotRuntimeError(code: "invalid_request", message: "type_text requires text.")
     }
-    guard arguments["app"] != nil || arguments["pid"] != nil else {
-      throw PilotRuntimeError(code: "invalid_request", message: "type_text requires app or pid.")
-    }
-
     let app = try prepareKeyboardTarget(arguments: arguments)
-    try postKeyboardText(text, targetPID: app.processIdentifier, arguments: arguments)
+    let target = try actionElement(arguments: arguments)
+    if let target {
+      let role = stringAttribute(target, kAXRoleAttribute) ?? ""
+      guard [kAXTextFieldRole, kAXTextAreaRole, kAXComboBoxRole].contains(role) else {
+        throw PilotRuntimeError(code: "invalid_request", message: "Targeted type_text requires an editable text control.")
+      }
+      _ = AXUIElementSetAttributeValue(target, kAXFocusedAttribute as CFString, kCFBooleanTrue)
+      let root = preparedRootElement(processIdentifier: app.processIdentifier)
+      if !editableHasFocus(target, app: root) {
+        _ = AXUIElementPerformAction(target, kAXPressAction as CFString)
+      }
+      for _ in 0..<6 {
+        if editableHasFocus(target, app: root) { break }
+        RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.05))
+      }
+      guard editableHasFocus(target, app: root) else {
+        throw PilotRuntimeError(code: "element_focus_failed", message: "The requested editable control did not receive focus; no text was sent.")
+      }
+    } else if arguments["replace"]?.boolValue == true {
+      throw PilotRuntimeError(code: "invalid_request", message: "replace requires element_index or selector.")
+    }
+    if arguments["replace"]?.boolValue == true {
+      postKeyboardChord(try KeyboardChord.parse("Super_L+a"), targetPID: app.processIdentifier)
+    }
+    try postKeyboardText(text, targetPID: app.processIdentifier, arguments: arguments, expectedElement: target)
+    if arguments["submit"]?.boolValue == true {
+      if let target, !editableHasFocus(target, app: preparedRootElement(processIdentifier: app.processIdentifier)) {
+        throw PilotRuntimeError(code: "element_focus_failed", message: "Text was sent but the control lost focus; Return was not sent.")
+      }
+      postKeyboardChord(try KeyboardChord.parse("Return"), targetPID: app.processIdentifier)
+    }
     return .object([
       "charactersTyped": .number(Double(text.count)),
       "success": .bool(true)
@@ -971,20 +1000,53 @@ public final class AccessibilityPilot {
     return app
   }
 
-  private func settleBeforeObservation(app: NSRunningApplication) {
-    guard let actionAt = pendingSettleAtByPID.removeValue(forKey: app.processIdentifier) else { return }
-    let graceDeadline = actionAt.addingTimeInterval(1)
-    if graceDeadline > Date() {
-      RunLoop.main.run(until: graceDeadline)
+  private func settleBeforeObservation(app: NSRunningApplication, root: AXUIElement, arguments: [String: JSONValue]) -> JSONValue? {
+    let actionAt = pendingSettleAtByPID.removeValue(forKey: app.processIdentifier)
+    let expected = arguments["waitForText"]?.stringValue
+    guard actionAt != nil || expected != nil else { return nil }
+    let start = Date()
+    let timeout = Double(arguments["timeoutMs"]?.intValue ?? 5000) / 1000
+    let deadline = start.addingTimeInterval(timeout)
+    var settler = ObservationSettler()
+    var ready = false
+    repeat {
+      var remaining = 2000
+      var parts: [String] = []
+      var busy = false
+      sampleReadiness(root, depth: 0, remaining: &remaining, parts: &parts, busy: &busy, deadline: deadline)
+      if Date() >= deadline { break }
+      ready = settler.ready(signature: parts.joined(separator: "\n"), busy: busy,
+        elapsed: Date().timeIntervalSince(start), expected: expected)
+      if ready { break }
+      RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.1))
+    } while Date().timeIntervalSince(start) < timeout
+    return .object(["timedOut": .bool(!ready), "condition": .string(expected == nil ? "stable" : "text"),
+      "elapsedMs": .number(Date().timeIntervalSince(start) * 1000)])
+  }
+
+  private func sampleReadiness(_ element: AXUIElement, depth: Int, remaining: inout Int, parts: inout [String], busy: inout Bool, deadline: Date) {
+    guard remaining > 0, depth < 24, Date() < deadline else { return }
+    remaining -= 1
+    let role = stringAttribute(element, kAXRoleAttribute)
+    if let role { parts.append(role) }
+    for attribute in [kAXTitleAttribute, kAXValueAttribute, kAXDescriptionAttribute] {
+      var value: CFTypeRef?
+      if AXUIElementCopyAttributeValue(element, attribute as CFString, &value) == .success, let value = value as? String {
+        parts.append(String(value.prefix(500)))
+      }
     }
-    let deadline = Date(timeIntervalSinceNow: 4)
-    let root = AXUIElementCreateApplication(app.processIdentifier)
-    while Date() < deadline {
-      var busyValue: CFTypeRef?
-      let busy = AXUIElementCopyAttributeValue(root, kAXElementBusyAttribute as CFString, &busyValue) == .success
-        && (busyValue as? Bool) == true
-      if !busy { return }
-      RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.2))
+    var value: CFTypeRef?
+    _ = AXUIElementCopyAttributeValue(element, kAXElementBusyAttribute as CFString, &value)
+    // WebKit exposes document loading separately from AXElementBusy.
+    let isWeb = role == "AXWebArea"
+    let loaded = isWeb ? windowTargets.attribute(element, "AXLoaded") as? Bool : nil
+    let progress = isWeb ? windowTargets.attribute(element, "AXLoadingProgress") as? Double : nil
+    if ObservationSettler.isLoading(role: role, busy: value as? Bool == true, loaded: loaded, progress: progress) { busy = true }
+    var children: CFTypeRef?
+    if AXUIElementCopyAttributeValue(element, kAXChildrenAttribute as CFString, &children) == .success {
+      for child in (children as? [AXUIElement] ?? []).prefix(remaining) {
+        sampleReadiness(child, depth: depth + 1, remaining: &remaining, parts: &parts, busy: &busy, deadline: deadline)
+      }
     }
   }
 
@@ -1308,13 +1370,13 @@ public final class AccessibilityPilot {
     siblingIndex: Int,
     parentRole: String?,
     includeMacChrome: Bool,
-    pendingSiblingLabel: inout String?,
     maxDepth: Int?,
     remaining: inout Int?,
     visitedCount: inout Int,
     elements: inout [JSONValue],
     stateRows: inout [AccessibilityStateRow],
-    observedElementIDs: inout Set<Int>
+    observedElementIDs: inout Set<Int>,
+    ancestorLabels: Set<String> = []
   ) -> JSONValue {
     guard consumeNode(&remaining) else {
       return .object(["truncated": .bool(true)])
@@ -1334,13 +1396,8 @@ public final class AccessibilityPilot {
     node["actions"] = .array(actionNames(element).map { .string($0) })
     enrichCompactLineNode(&node, from: element)
     let role = humanRole(node["role"]?.stringValue)
-    if shouldCaptureSiblingLabel(node, role: role) {
-      pendingSiblingLabel = preferredTextLabel(node)
-      node["siblingLabelCaptured"] = .bool(true)
-    } else {
-      applyPendingSiblingLabel(&node, role: role, pendingSiblingLabel: &pendingSiblingLabel)
-    }
-    if shouldRenderStateLine(node, depth: depth, parentRole: parentRole, includeMacChrome: includeMacChrome) {
+    let rendered = shouldRenderStateLine(node, depth: depth, parentRole: parentRole, includeMacChrome: includeMacChrome, ancestorLabels: ancestorLabels)
+    if rendered {
       let line = "\(stateLineIndent(depth))\(elementLine(node))"
       stateRows.append(AccessibilityStateRow(
         elementIndex: index,
@@ -1360,7 +1417,7 @@ public final class AccessibilityPilot {
       return .object(node)
     }
 
-    var pendingSiblingLabel: String?
+    let childLabels = rendered ? ancestorLabels.union(stateTextLabels(node)) : ancestorLabels
     let childNodes = boundedChildNodes(children, remaining: &remaining) {
       child, childIndex, remaining in
       indexedSnapshotElement(
@@ -1371,13 +1428,13 @@ public final class AccessibilityPilot {
         siblingIndex: childIndex,
         parentRole: role,
         includeMacChrome: includeMacChrome,
-        pendingSiblingLabel: &pendingSiblingLabel,
         maxDepth: maxDepth,
         remaining: &remaining,
         visitedCount: &visitedCount,
         elements: &elements,
         stateRows: &stateRows,
-        observedElementIDs: &observedElementIDs
+        observedElementIDs: &observedElementIDs,
+        ancestorLabels: childLabels
       )
     }
     node["children"] = .array(childNodes)
@@ -1471,16 +1528,25 @@ public final class AccessibilityPilot {
     String(repeating: "  ", count: depth)
   }
 
-  private func shouldRenderStateLine(
+  func shouldRenderStateLine(
     _ element: [String: JSONValue],
     depth: Int,
     parentRole: String?,
-    includeMacChrome: Bool
+    includeMacChrome: Bool,
+    ancestorLabels: Set<String> = []
   ) -> Bool {
     let role = humanRole(element["role"]?.stringValue)
-    if element["siblingLabelCaptured"]?.boolValue == true {
-      return false
-    }
+    // Short static text includes prices, stock status, and sizes. Never drop it
+    // merely because it could have been a label for a subsequent control.
+    if roleIsReadableText(role) && !hasAnyTextAttribute(element) { return false }
+    if roleIsReadableText(role), element["focused"]?.boolValue != true,
+       element["settable"]?.boolValue != true,
+       !stateTextLabels(element).isEmpty,
+       stateTextLabels(element).isSubset(of: ancestorLabels) { return false }
+    if role == "group", !hasAnyTextAttribute(element),
+       element["focused"]?.boolValue != true, element["settable"]?.boolValue != true,
+       !shouldRenderGroupLine(element),
+       (element["actions"] == nil || element["actions"] == .array([])) { return false }
     if parentRole == "cell", roleIsReadableText(role) {
       return false
     }
@@ -1530,6 +1596,12 @@ public final class AccessibilityPilot {
     return false
   }
 
+  private func stateTextLabels(_ element: [String: JSONValue]) -> Set<String> {
+    let role = humanRole(element["role"]?.stringValue)
+    let keys = roleIsReadableText(role) ? ["title", "description", "value"] : ["title", "description"]
+    return Set(keys.compactMap { element[$0]?.stringValue?.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty })
+  }
+
   private func enrichCompactLineNode(_ node: inout [String: JSONValue], from element: AXUIElement) {
     let role = humanRole(node["role"]?.stringValue)
     guard roleIsListItem(role), !hasAnyTextAttribute(node) else {
@@ -1540,36 +1612,6 @@ public final class AccessibilityPilot {
       return
     }
     node["title"] = .string(labels.joined(separator: ", "))
-  }
-
-  private func shouldCaptureSiblingLabel(_ node: [String: JSONValue], role: String) -> Bool {
-    guard role == "static text" || role == "text" else {
-      return false
-    }
-    guard let label = preferredTextLabel(node) else {
-      return false
-    }
-    return label.count <= 80
-  }
-
-  private func applyPendingSiblingLabel(_ node: inout [String: JSONValue], role: String, pendingSiblingLabel: inout String?) {
-    guard let label = pendingSiblingLabel else {
-      return
-    }
-    defer { pendingSiblingLabel = nil }
-    guard roleCanUseSiblingLabel(role), node["title"] == nil else {
-      return
-    }
-    node["title"] = .string(label)
-  }
-
-  private func roleCanUseSiblingLabel(_ role: String) -> Bool {
-    roleIsActionable(role) ||
-      role == "check box" ||
-      role == "pop up button" ||
-      role == "combo box" ||
-      role == "slider" ||
-      role == "text field"
   }
 
   private func descendantTextLabels(_ element: AXUIElement, limit: Int) -> [String] {
@@ -1639,7 +1681,7 @@ public final class AccessibilityPilot {
     return subrole.hasPrefix("AXLandmark")
   }
 
-  private func elementLine(_ element: [String: JSONValue]) -> String {
+  func elementLine(_ element: [String: JSONValue]) -> String {
     var segments: [String] = []
     let index = element["index"]?.stringValue
     if let index {
@@ -1669,7 +1711,9 @@ public final class AccessibilityPilot {
     segments.append(roleSegment)
 
     appendTextAttribute("title", from: element, to: &segments)
-    appendTextAttribute("description", label: "desc", from: element, to: &segments)
+    if element["description"]?.stringValue != element["title"]?.stringValue {
+      appendTextAttribute("description", label: "desc", from: element, to: &segments)
+    }
     appendCompactValue(from: element, role: displayRole, to: &segments)
     appendCompactSubrole(from: element, role: role, to: &segments)
 
@@ -2119,13 +2163,15 @@ public final class AccessibilityPilot {
     }
   }
 
-  private func postKeyboardText(_ text: String, targetPID: pid_t, arguments: [String: JSONValue]) throws {
+  private func postKeyboardText(_ text: String, targetPID: pid_t, arguments: [String: JSONValue], expectedElement: AXUIElement? = nil) throws {
     let source = CGEventSource(stateID: .hidSystemState)
     let window = try selectedWindow(arguments: arguments)
     let appRoot = preparedRootElement(processIdentifier: targetPID)
     let input = TargetBoundKeyboardInput(
       isTargetFocused: { [self] pid in
-        keyboardTargetIsRunning(pid) && windowTargets.isKeyboardTarget(window.element, app: appRoot)
+        guard keyboardTargetIsRunning(pid), windowTargets.isKeyboardTarget(window.element, app: appRoot) else { return false }
+        guard let expectedElement else { return true }
+        return editableHasFocus(expectedElement, app: appRoot)
       },
       pauseBetweenCharacters: { usleep(5_000) },
       postCharacter: { [self] character in
@@ -2149,6 +2195,12 @@ public final class AccessibilityPilot {
     }
   }
 
+  private func editableHasFocus(_ element: AXUIElement, app: AXUIElement) -> Bool {
+    var focused: CFTypeRef?
+    AXUIElementCopyAttributeValue(app, kAXFocusedUIElementAttribute as CFString, &focused)
+    return focused.map { CFEqual($0, element) } ?? false
+  }
+
   private func prepareKeyboardTarget(arguments: [String: JSONValue], foreground: Bool = false) throws -> NSRunningApplication {
     let app = try runningApplication(arguments: arguments)
     let window = try selectedWindow(arguments: arguments)
@@ -2159,7 +2211,7 @@ public final class AccessibilityPilot {
       }
     }
     let root = preparedRootElement(processIdentifier: app.processIdentifier)
-    try windowTargets.focus(window.element, app: root)
+    try windowTargets.focus(window.element, app: root, allowRaise: foreground)
     return app
   }
 

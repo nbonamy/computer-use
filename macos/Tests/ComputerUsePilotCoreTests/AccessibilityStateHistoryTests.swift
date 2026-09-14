@@ -7,14 +7,14 @@ final class AccessibilityStateHistoryTests: XCTestCase {
     let history = AccessibilityStateHistory()
     let first = history.render(
       key: "app",
-      header: ["header"],
+      header: [String(repeating: "window context ", count: 30)],
       rows: [row(1, "1 button \"Save\"", 0), row(2, "2 text \"Draft\"", 1)],
       footer: [],
       disableDiff: false
     )
     let second = history.render(
       key: "app",
-      header: ["header"],
+      header: [String(repeating: "window context ", count: 30)],
       rows: [row(1, "1 button \"Save\"", 0), row(2, "2 text \"Saved\"", 1), row(3, "3 image", 2)],
       footer: [],
       disableDiff: false
@@ -32,21 +32,21 @@ final class AccessibilityStateHistoryTests: XCTestCase {
     let history = AccessibilityStateHistory()
     _ = history.render(
       key: "app",
-      header: [],
+      header: [String(repeating: "window context ", count: 30)],
       rows: [row(1, "1 first", 0), row(2, "2 second", 1), row(3, "3 third", 2)],
       footer: [],
       disableDiff: false
     )
     let result = history.render(
       key: "app",
-      header: [],
+      header: [String(repeating: "window context ", count: 30)],
       rows: [row(3, "3 third", 0), row(1, "1 first", 1)],
       footer: [],
       disableDiff: false
     )
 
     XCTAssertEqual(result.kind, "diff")
-    XCTAssertTrue(result.text.contains("- 2 second"))
+    XCTAssertTrue(result.text.contains("Removed IDs: 2"))
     XCTAssertTrue(result.text.contains("~ 3 third"))
     XCTAssertTrue(result.text.contains("~ 1 first"))
   }
@@ -54,8 +54,8 @@ final class AccessibilityStateHistoryTests: XCTestCase {
   func testNoChangeIsConcise() {
     let history = AccessibilityStateHistory()
     let rows = [row(8, "8 checkbox \"Enabled\"", 0)]
-    _ = history.render(key: "app", header: ["header"], rows: rows, footer: [], disableDiff: false)
-    let result = history.render(key: "app", header: ["header"], rows: rows, footer: [], disableDiff: false)
+    _ = history.render(key: "app", header: [String(repeating: "window context ", count: 30)], rows: rows, footer: [], disableDiff: false)
+    let result = history.render(key: "app", header: [String(repeating: "window context ", count: 30)], rows: rows, footer: [], disableDiff: false)
 
     XCTAssertEqual(result.kind, "diff")
     XCTAssertTrue(result.text.contains("(no accessibility changes)"))
@@ -63,9 +63,9 @@ final class AccessibilityStateHistoryTests: XCTestCase {
 
   func testForcedFullStateReplacesBaseline() {
     let history = AccessibilityStateHistory()
-    _ = history.render(key: "app", header: [], rows: [row(1, "1 old", 0)], footer: [], disableDiff: false)
-    let full = history.render(key: "app", header: [], rows: [row(1, "1 new", 0)], footer: [], disableDiff: true)
-    let diff = history.render(key: "app", header: [], rows: [row(1, "1 newest", 0)], footer: [], disableDiff: false)
+    _ = history.render(key: "app", header: [String(repeating: "window context ", count: 30)], rows: [row(1, "1 old", 0)], footer: [], disableDiff: false)
+    let full = history.render(key: "app", header: [String(repeating: "window context ", count: 30)], rows: [row(1, "1 new", 0)], footer: [], disableDiff: true)
+    let diff = history.render(key: "app", header: [String(repeating: "window context ", count: 30)], rows: [row(1, "1 newest", 0)], footer: [], disableDiff: false)
 
     XCTAssertEqual(full.kind, "full")
     XCTAssertEqual(diff.baseRevision, full.revision)
@@ -75,7 +75,7 @@ final class AccessibilityStateHistoryTests: XCTestCase {
     let history = AccessibilityStateHistory()
     let first = history.render(
       key: "app",
-      header: [],
+      header: [String(repeating: "window context ", count: 30)],
       rows: [row(1, "1 a hierarchy too large for the caller", 0)],
       footer: [],
       disableDiff: false,
@@ -83,7 +83,7 @@ final class AccessibilityStateHistoryTests: XCTestCase {
     )
     let second = history.render(
       key: "app",
-      header: [],
+      header: [String(repeating: "window context ", count: 30)],
       rows: [row(1, "1 another hierarchy too large", 0)],
       footer: [],
       disableDiff: false,
@@ -99,14 +99,14 @@ final class AccessibilityStateHistoryTests: XCTestCase {
     let history = AccessibilityStateHistory()
     _ = history.render(
       key: "app",
-      header: [],
+      header: [String(repeating: "window context ", count: 30)],
       rows: [row(7, "7 first path", 0), row(7, "7 repeated path", 1)],
       footer: [],
       disableDiff: false
     )
     let result = history.render(
       key: "app",
-      header: [],
+      header: [String(repeating: "window context ", count: 30)],
       rows: [row(7, "7 current path", 0)],
       footer: [],
       disableDiff: false
@@ -120,7 +120,7 @@ final class AccessibilityStateHistoryTests: XCTestCase {
     let history = AccessibilityStateHistory()
     _ = history.render(
       key: "app",
-      header: [],
+      header: [String(repeating: "window context ", count: 30)],
       rows: [
         hierarchyRow(1, "1 transient", parent: 0, sibling: 0),
         hierarchyRow(2, "2 window", parent: 0, sibling: 1),
@@ -131,7 +131,7 @@ final class AccessibilityStateHistoryTests: XCTestCase {
     )
     let result = history.render(
       key: "app",
-      header: [],
+      header: [String(repeating: "window context ", count: 30)],
       rows: [
         hierarchyRow(2, "2 window", parent: 0, sibling: 0),
         hierarchyRow(3, "3 button", parent: 2, sibling: 0)
@@ -140,7 +140,7 @@ final class AccessibilityStateHistoryTests: XCTestCase {
       disableDiff: false
     )
 
-    XCTAssertTrue(result.text.contains("- 1 transient"))
+    XCTAssertTrue(result.text.contains("Removed IDs: 1"))
     XCTAssertTrue(result.text.contains("~ 2 window"))
     XCTAssertFalse(result.text.contains("~ 3 button"))
   }

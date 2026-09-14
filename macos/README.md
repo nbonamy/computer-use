@@ -97,7 +97,8 @@ require a window ID.
 AX element actions remain usable in the background. Cross-window element or
 coordinate targets return `window_mismatch`. Keyboard input selects and verifies
 the requested window's keyboard focus before delivery, returning
-`window_focus_failed` if selection fails. This can raise the window. Physical
+`window_focus_failed` if selection fails. Background keyboard targeting does not
+raise the window. Physical
 clicks, drags, and unindexed scrolling additionally activate the app.
 
 `screenshot` accepts `scope: "window" | "screen"`. Window capture is the
@@ -117,7 +118,10 @@ combination is a full hierarchy. Later observations are diffs by default:
 
 - `+` means added.
 - `~` means changed or moved.
-- `-` means removed.
+- `Removed IDs:` lists removed element IDs as compact ranges.
+
+If a diff would be larger than the full hierarchy, the helper returns a new
+full baseline instead. Identical titles and descriptions are emitted only once.
 
 Each result includes `stateKind`, `stateRevision`, and, for a diff,
 `baseRevision`. Pass `disableDiff: true` to force a full hierarchy and establish
@@ -131,15 +135,30 @@ latest in-process element registry and fail with `stale_element` when an element
 is gone or belongs to another app. The helper never silently redirects a stale
 index to a different control.
 
-After a successful mutation, the next observation for that app waits at least
-one second and then waits for the app's Accessibility busy state to clear, up
-to five seconds total. This lets callers inspect settled UI without duplicating
-fixed delays in every adapter.
+After a successful mutation, the next observation waits for bounded stability
+of the selected window's AX descendants, including busy states (five seconds
+by default). `waitForText` additionally requires matching AX text;
+`timeoutMs` may be set from 1 to 15000. The returned `settling` metadata reports
+timeouts. Stable AX state is evidence, not proof that the application completed
+the intended operation; consumers must inspect the result.
+Web-document `AXLoaded` and `AXLoadingProgress` participate in readiness, not
+just `AXElementBusy`. Text conditions require a sustained match but do not
+require unrelated text (such as countdowns) to stop changing. The wait budget
+is checked during sampling; an individual macOS AX call can still overrun it.
+
+Compact text preserves short standalone facts (including prices and stock
+status). It omits empty noninteractive groups and text exactly repeated by a
+rendered ancestor, rather than guessing that short text is a control label.
 
 Pass the app selector and selected `window_id` to `type_text`, `press_key`, and
 `paste`. Keyboard events are posted directly to that process after verifying
-the selected window's keyboard focus. Window selection may raise the window;
+the selected window's keyboard focus, without raising the window;
 typing stops if that window loses focus or the process exits during delivery.
+`type_text` accepts an `element_index` or semantic selector to focus and verify
+an editable control internally. With a target, `replace: true` selects its
+existing text before typing; `submit: true` sends Return afterward. Targeted
+typing stops if the editable control loses focus. Unknown command arguments
+are rejected rather than silently ignored.
 Consumers should use `set_value` for
 ordinary settable controls and reserve synthetic typing for controls that need
 keyboard semantics.
