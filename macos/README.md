@@ -55,6 +55,10 @@ control, such as an Electron/web control that accepts `AXPress` without acting.
 Right and middle clicks are necessarily physical. Physical clicks and drags
 require the target app to remain frontmost and unobstructed.
 
+Physical clicks move the real pointer smoothly to the target and leave it there
+after clicking. Movement posts native mouse-move events, suppresses the virtual
+cursor halo and stops before clicking if the target app loses focus.
+
 The helper shows a click-through blue cursor halo so users can see Computer Use
 activity. The halo itself does not move the hardware pointer; an opted-in
 physical click does. The halo lives for the helper process session. Consumers

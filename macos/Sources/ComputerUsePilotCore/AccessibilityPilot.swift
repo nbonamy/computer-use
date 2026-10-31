@@ -76,7 +76,9 @@ public final class AccessibilityPilot {
     } catch {
       return .failure(id: request.id, code: "invalid_request", message: error.localizedDescription)
     }
-    if request.command != "screenshot" && request.arguments["showCursor"]?.boolValue != false {
+    if request.command == "click" && (physicalClickRequested(request.arguments) || (try? mouseButtonArgument(request.arguments)) != .left) {
+      _ = cursorOverlay.hideForCapture()
+    } else if request.command != "screenshot" && request.arguments["showCursor"]?.boolValue != false {
       presentInitialCursorIfNeeded()
     }
     switch request.command {
@@ -595,7 +597,6 @@ public final class AccessibilityPilot {
     if let element = try actionElement(arguments: arguments) {
       if physical {
         let point = try centerPoint(of: element)
-        showComputerUseCursor(at: point)
         try postMouseClick(
           at: point,
           clickCount: clickCount,
@@ -629,7 +630,7 @@ public final class AccessibilityPilot {
     // Show the intended Computer Use position even when the coordinate does
     // not resolve to an actionable Accessibility element. This keeps the
     // software cursor useful for previews and makes failed actions observable.
-    showComputerUseCursor(at: point)
+    if !physical { showComputerUseCursor(at: point) }
     let method: String
     if physical {
       try postMouseClick(
@@ -2108,8 +2109,10 @@ public final class AccessibilityPilot {
         CGEvent(source: nil)?.location ?? .zero
       },
       postClicks: postMouseEvents,
-      restorePointerLocation: { point in
+      movePointer: { point in
         CGWarpMouseCursorPosition(point)
+        CGEvent(mouseEventSource: CGEventSource(stateID: .hidSystemState), mouseType: .mouseMoved,
+          mouseCursorPosition: point, mouseButton: .left)?.post(tap: .cghidEventTap)
       }
     )
   }

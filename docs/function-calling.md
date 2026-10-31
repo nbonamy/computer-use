@@ -41,7 +41,7 @@ commands. Each tool maps to one Pilot method.
 | `computer_use_launch_app` | `launch_app` | Start an app. | `bundleIdentifier?`, `path?`, `activate?` |
 | `computer_use_focus_app` | `focus_app` | Bring a running app forward. | `app?`, `bundleIdentifier?`, `pid?` |
 | `computer_use_get_app_state` | `get_app_state` | Return a screenshot plus full or diffed Accessibility state. | app selector, `disableDiff?`, `includeScreenshot?`, `rootElementIndex?`, traversal options |
-| `computer_use_click` | `click` | Activate a fresh accessibility element or a coordinate target. | app selector plus `element_index`, or `x` and `y` |
+| `computer_use_click` | `click` | Activate a fresh accessibility element or a coordinate target. | app selector plus `element_index`, or `x` and `y`; optional `physical` |
 | `computer_use_dismiss` | `dismiss` | Dismiss an active native menu or popover with `AXCancel`. | app selector and optional accessibility scope or semantic selector |
 | `computer_use_press_key` | `press_key` | Press a key or keyboard chord. | app selector, `key` |
 | `computer_use_type_text` | `type_text` | Type literal text into the focused element. | app selector plus `text` |
@@ -183,6 +183,10 @@ and debug fields opt-in because they can consume significant context.
 Keyboard commands require an explicit app or pid and post events directly to
 that process. The Pilot stops delivery if the process exits; foreground focus
 is required only for physical mouse clicks and drags.
+
+Clicks animate the virtual cursor by default. Physical clicks animate the real
+pointer, suppress the virtual cursor halo and leave the pointer at the destination.
+The target must retain foreground focus throughout physical movement.
 
 ## App responsibilities
 

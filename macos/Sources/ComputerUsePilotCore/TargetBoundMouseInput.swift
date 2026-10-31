@@ -9,7 +9,8 @@ struct TargetBoundMouseInput {
   let isTargetFocused: (pid_t) -> Bool
   let currentPointerLocation: () -> CGPoint
   let postClicks: (CGPoint, Int, CGMouseButton) -> Void
-  let restorePointerLocation: (CGPoint) -> Void
+  let movePointer: (CGPoint) -> Void
+  var movementPause: () -> Void = { usleep(16_000) }
 
   func click(
     at point: CGPoint,
@@ -21,7 +22,21 @@ struct TargetBoundMouseInput {
       throw TargetBoundMouseInputError.targetLostFocus
     }
     let pointerLocation = currentPointerLocation()
-    defer { restorePointerLocation(pointerLocation) }
+    for step in 1...20 {
+      guard isTargetFocused(targetPID) else {
+        throw TargetBoundMouseInputError.targetLostFocus
+      }
+      let progress = CGFloat(step) / 20
+      let eased = progress * progress * (3 - 2 * progress)
+      movePointer(CGPoint(
+        x: pointerLocation.x + (point.x - pointerLocation.x) * eased,
+        y: pointerLocation.y + (point.y - pointerLocation.y) * eased
+      ))
+      movementPause()
+    }
+    guard isTargetFocused(targetPID) else {
+      throw TargetBoundMouseInputError.targetLostFocus
+    }
     postClicks(point, clickCount, button)
   }
 

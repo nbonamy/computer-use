@@ -220,6 +220,11 @@ final class PilotProtocolTests: XCTestCase {
       command: "get_app_state",
       arguments: ["showCursor": .bool(false), "includeScreenshot": .bool(false)]
     ))
+    _ = pilot.handle(PilotRequest(
+      id: "physical-click",
+      command: "click",
+      arguments: ["window_id": .number(1), "physical": .bool(true)]
+    ))
 
     XCTAssertEqual(presentationCount, 0)
   }
