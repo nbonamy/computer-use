@@ -209,7 +209,7 @@ public final class AccessibilityPilot {
       "accessibilityTrusted": .bool(AXIsProcessTrusted()),
       "screenCaptureTrusted": .bool(screenCapturer.isTrusted),
       "platform": .string("macos"),
-      "version": .string("2.0.2"),
+      "version": .string("2.0.3"),
       "success": .bool(true)
     ])
   }

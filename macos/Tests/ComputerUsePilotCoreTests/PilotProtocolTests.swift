@@ -346,7 +346,7 @@ final class PilotProtocolTests: XCTestCase {
     XCTAssertEqual(response.ok, true)
     XCTAssertNotNil(response.result?.objectValue?["accessibilityTrusted"]?.boolValue)
     XCTAssertNotNil(response.result?.objectValue?["screenCaptureTrusted"]?.boolValue)
-    XCTAssertEqual(response.result?.objectValue?["version"]?.stringValue, "2.0.2")
+    XCTAssertEqual(response.result?.objectValue?["version"]?.stringValue, "2.0.3")
     XCTAssertNil(response.result?.objectValue?["protocol"])
   }
 
