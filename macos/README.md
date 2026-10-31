@@ -157,15 +157,29 @@ rendered ancestor, rather than guessing that short text is a control label.
 Pass the app selector and selected `window_id` to `type_text`, `press_key`, and
 `paste`. Keyboard events are posted directly to that process after verifying
 the selected window's keyboard focus, without raising the window;
-typing stops if that window loses focus or the process exits during delivery.
+keyboard typing stops if that window loses focus or the process exits during delivery.
 `type_text` accepts an `element_index` or semantic selector to focus and verify
 an editable control internally. With a target, `replace: true` selects its
 existing text before typing; `submit: true` sends Return afterward. Targeted
-typing stops if the editable control loses focus. Unknown command arguments
+keyboard typing stops if the editable control loses focus. Unknown command arguments
 are rejected rather than silently ignored.
-Consumers should use `set_value` for
-ordinary settable controls and reserve synthetic typing for controls that need
-keyboard semantics.
+
+`type_text` defaults to `method: "paste"`: it inserts the entire string with
+one plain-text clipboard paste, avoiding per-character delays and focus checks.
+The selected window and targeted control are verified before pasting and before
+an optional Return. The previous clipboard contents are restored unless another
+process changed them during the operation. Results retain `charactersTyped`
+and report `method` plus `clipboardRestored` when a paste was performed.
+The snapshot preserves every item and its formats, including image and binary
+data. If any format cannot be read, the command returns
+`clipboard_snapshot_failed` before replacing the clipboard. A failed restore
+returns `clipboard_restore_failed` rather than reporting success.
+An empty string inserts nothing; `replace` and `submit` still apply.
+
+Use `method: "keyboard"` for controls that reject paste or require individual
+keyboard events. In keyboard mode, tabs and newlines send Tab and Return;
+paste mode inserts them as text. Consumers can use `set_value` for ordinary
+settable controls.
 
 `press_key` accepts a key or `+`-separated chord using X keysym-style names,
 for example `Return`, `Control_L+a`, or `Super_L+v`. Common aliases such as

@@ -5,6 +5,19 @@ import XCTest
 
 final class PilotProtocolTests: XCTestCase {
   @MainActor
+  func testInvalidTypingMethodFailsBeforeSideEffects() {
+    var effects = 0
+    let pilot = AccessibilityPilot(initialCursorPresenter: { effects += 1 })
+    for method: JSONValue in [.string("unknown"), .bool(true), .null] {
+      let response = pilot.handle(PilotRequest(id: "invalid-method", command: "type_text",
+        arguments: ["window_id": .number(1), "text": .string("hello"), "method": method]))
+      XCTAssertEqual(response.error?.code, "invalid_request")
+      XCTAssertTrue(response.error?.message.contains("method") == true)
+    }
+    XCTAssertEqual(effects, 0)
+  }
+
+  @MainActor
   func testAmbiguousCommandsRejectMissingWindowBeforeAnySideEffects() {
     var cursorCount = 0
     let capturer = FakeScreenCapturer()

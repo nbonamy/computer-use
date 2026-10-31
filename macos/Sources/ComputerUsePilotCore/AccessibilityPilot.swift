@@ -696,20 +696,27 @@ public final class AccessibilityPilot {
     } else if arguments["replace"]?.boolValue == true {
       throw PilotRuntimeError(code: "invalid_request", message: "replace requires element_index or selector.")
     }
+    try requireKeyboardFocus(targetPID: app.processIdentifier, arguments: arguments, expectedElement: target)
     if arguments["replace"]?.boolValue == true {
       postKeyboardChord(try KeyboardChord.parse("Super_L+a"), targetPID: app.processIdentifier)
     }
-    try postKeyboardText(text, targetPID: app.processIdentifier, arguments: arguments, expectedElement: target)
+    let method = arguments["method"]?.stringValue ?? "paste"
+    var result: [String: JSONValue] = [
+      "charactersTyped": .number(Double(text.count)),
+      "method": .string(method),
+      "success": .bool(true)
+    ]
+    if method == "keyboard" {
+      try postKeyboardText(text, targetPID: app.processIdentifier, arguments: arguments, expectedElement: target)
+    } else if !text.isEmpty {
+      result["clipboardRestored"] = .bool(try postClipboardText(text, format: "text",
+        targetPID: app.processIdentifier, arguments: arguments, expectedElement: target))
+    }
     if arguments["submit"]?.boolValue == true {
-      if let target, !editableHasFocus(target, app: preparedRootElement(processIdentifier: app.processIdentifier)) {
-        throw PilotRuntimeError(code: "element_focus_failed", message: "Text was sent but the control lost focus; Return was not sent.")
-      }
+      try requireKeyboardFocus(targetPID: app.processIdentifier, arguments: arguments, expectedElement: target)
       postKeyboardChord(try KeyboardChord.parse("Return"), targetPID: app.processIdentifier)
     }
-    return .object([
-      "charactersTyped": .number(Double(text.count)),
-      "success": .bool(true)
-    ])
+    return .object(result)
   }
 
   private func pressKey(arguments: [String: JSONValue]) throws -> JSONValue {
@@ -775,28 +782,8 @@ public final class AccessibilityPilot {
       throw PilotRuntimeError(code: "invalid_request", message: "paste format must be text, md, or html.")
     }
     let app = try prepareKeyboardTarget(arguments: arguments)
-    guard keyboardTargetIsRunning(app.processIdentifier) else {
-      throw PilotRuntimeError(code: "action_unavailable", message: "The requested app is no longer running.")
-    }
-
-    let pasteboard = NSPasteboard.general
-    let snapshot = PasteboardSnapshot(pasteboard: pasteboard)
-    pasteboard.clearContents()
-    let item = NSPasteboardItem()
-    item.setString(text, forType: .string)
-    if format == "html" {
-      item.setString(text, forType: .html)
-    } else if format == "md" {
-      item.setString(text, forType: NSPasteboard.PasteboardType("net.daringfireball.markdown"))
-    }
-    pasteboard.writeObjects([item])
-    let ownedChangeCount = pasteboard.changeCount
-    postKeyboardChord(try KeyboardChord.parse("Super_L+v"), targetPID: app.processIdentifier)
-    RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.1))
-    let restored = pasteboard.changeCount == ownedChangeCount
-    if restored {
-      snapshot.restore(to: pasteboard)
-    }
+    let restored = try postClipboardText(text, format: format,
+      targetPID: app.processIdentifier, arguments: arguments)
     return .object([
       "charactersPasted": .number(Double(text.count)),
       "clipboardRestored": .bool(restored),
@@ -2202,6 +2189,36 @@ public final class AccessibilityPilot {
     var focused: CFTypeRef?
     AXUIElementCopyAttributeValue(app, kAXFocusedUIElementAttribute as CFString, &focused)
     return focused.map { CFEqual($0, element) } ?? false
+  }
+
+  private func requireKeyboardFocus(targetPID: pid_t, arguments: [String: JSONValue], expectedElement: AXUIElement? = nil) throws {
+    let window = try selectedWindow(arguments: arguments)
+    let root = preparedRootElement(processIdentifier: targetPID)
+    guard keyboardTargetIsRunning(targetPID), windowTargets.isKeyboardTarget(window.element, app: root) else {
+      throw PilotRuntimeError(code: "action_unavailable", message: "The selected window lost keyboard focus or the app exited; no further input was sent.")
+    }
+    if let expectedElement, !editableHasFocus(expectedElement, app: root) {
+      throw PilotRuntimeError(code: "element_focus_failed", message: "The requested editable control lost focus; no further input was sent.")
+    }
+  }
+
+  private func postClipboardText(_ text: String, format: String, targetPID: pid_t,
+    arguments: [String: JSONValue], expectedElement: AXUIElement? = nil) throws -> Bool {
+    try requireKeyboardFocus(targetPID: targetPID, arguments: arguments, expectedElement: expectedElement)
+    let item = NSPasteboardItem()
+    item.setString(text, forType: .string)
+    if format == "html" {
+      item.setString(text, forType: .html)
+    } else if format == "md" {
+      item.setString(text, forType: NSPasteboard.PasteboardType("net.daringfireball.markdown"))
+    }
+    return try PasteboardSnapshot.withTemporaryContents([item], on: .general) {
+      try requireKeyboardFocus(targetPID: targetPID, arguments: arguments, expectedElement: expectedElement)
+      postKeyboardChord(try KeyboardChord.parse("Super_L+v"), targetPID: targetPID)
+      // Paste delivery is asynchronous. Keep the payload available while the
+      // target handles the shortcut, then release our temporary clipboard.
+      RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.1))
+    }
   }
 
   private func prepareKeyboardTarget(arguments: [String: JSONValue], foreground: Bool = false) throws -> NSRunningApplication {
