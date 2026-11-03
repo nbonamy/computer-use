@@ -674,17 +674,24 @@ public final class AccessibilityPilot {
     guard let text = arguments["text"]?.stringValue else {
       throw PilotRuntimeError(code: "invalid_request", message: "type_text requires text.")
     }
-    let app = try prepareTextTarget(arguments: arguments)
     let target = try actionElement(arguments: arguments)
+    let app: NSRunningApplication
     if let target {
       let role = stringAttribute(target, kAXRoleAttribute) ?? ""
       guard [kAXTextFieldRole, kAXTextAreaRole, kAXComboBoxRole].contains(role) else {
         throw PilotRuntimeError(code: "invalid_request", message: "Targeted type_text requires an editable text control.")
       }
+      app = try runningApplication(arguments: arguments)
+      let window = try selectedWindow(arguments: arguments)
       let root = preparedRootElement(processIdentifier: app.processIdentifier)
-      try windowTargets.requireFocusedEditable(target, app: root)
+      if try windowTargets.focusEditableInBackground(target, window: window.element, app: root),
+        arguments["replace"]?.boolValue != true {
+        placeCaretAtEnd(target)
+      }
     } else if arguments["replace"]?.boolValue == true {
       throw PilotRuntimeError(code: "invalid_request", message: "replace requires element_index or selector.")
+    } else {
+      app = try prepareTextTarget(arguments: arguments)
     }
     try requireKeyboardFocus(targetPID: app.processIdentifier, arguments: arguments, expectedElement: target)
     if arguments["replace"]?.boolValue == true {
@@ -2173,6 +2180,14 @@ public final class AccessibilityPilot {
         message: "Typing stopped because the selected window lost keyboard focus or the app exited."
       )
     }
+  }
+
+  /// A background focus click lands mid-field; typing should append.
+  private func placeCaretAtEnd(_ element: AXUIElement) {
+    guard let value = stringAttribute(element, kAXValueAttribute) else { return }
+    var range = CFRange(location: (value as NSString).length, length: 0)
+    guard let caret = AXValueCreate(.cfRange, &range) else { return }
+    _ = AXUIElementSetAttributeValue(element, kAXSelectedTextRangeAttribute as CFString, caret)
   }
 
   private func editableHasFocus(_ element: AXUIElement, app: AXUIElement) -> Bool {

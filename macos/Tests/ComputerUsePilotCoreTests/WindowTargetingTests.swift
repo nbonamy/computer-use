@@ -5,40 +5,69 @@ import XCTest
 
 final class WindowTargetingTests: XCTestCase {
   @MainActor
-  func testTextPreflightAcceptsOnlyTheExactAppRootFocusedEditable() throws {
+  func testBackgroundFocusLeavesAnAlreadyFocusedEditableAlone() throws {
     let app = AXUIElementCreateApplication(101)
-    let field = AXUIElementCreateApplication(102)
+    let window = AXUIElementCreateApplication(102)
+    let field = AXUIElementCreateApplication(103)
     let targeting = WindowTargeting(attributeReader: { element, name in
-      CFEqual(element, app) && name == kAXFocusedUIElementAttribute ? field : nil
-    }, focusRequester: { _ in XCTFail("Text preflight must not request focus") },
-      raiseRequester: { _ in XCTFail("Text preflight must not raise") })
-    try targeting.requireFocusedEditable(field, app: app)
+      guard CFEqual(element, app) else { return nil }
+      return name == kAXFocusedWindowAttribute ? window : name == kAXFocusedUIElementAttribute ? field : nil
+    }, focusRequester: { _ in XCTFail("Must not request window focus") },
+      raiseRequester: { _ in XCTFail("Must not raise") },
+      backgroundFocuser: { _, _ in XCTFail("Already focused editable must not be clicked") })
+    try targeting.focusEditableInBackground(field, window: window, app: app)
   }
 
   @MainActor
-  func testTextPreflightRefusesMissingRootFocusEvenWhenTheFieldClaimsFocus() {
+  func testBackgroundFocusMovesFocusToTheFieldInAnotherWindowWithoutRaisingIt() throws {
     let app = AXUIElementCreateApplication(101)
-    let field = AXUIElementCreateApplication(102)
+    let window = AXUIElementCreateApplication(102)
+    let field = AXUIElementCreateApplication(103)
+    var focusedWindow = AXUIElementCreateApplication(104)
+    var focusedField = AXUIElementCreateApplication(105)
+    var requests: [(window: AXUIElement, field: AXUIElement)] = []
     let targeting = WindowTargeting(attributeReader: { element, name in
-      CFEqual(element, field) && name == kAXFocusedAttribute ? kCFBooleanTrue : nil
-    }, focusRequester: { _ in XCTFail("Missing root focus must not trigger a focus request") },
-      raiseRequester: { _ in XCTFail("Missing root focus must not raise") })
-    XCTAssertThrowsError(try targeting.requireFocusedEditable(field, app: app)) { error in
+      guard CFEqual(element, app) else { return nil }
+      return name == kAXFocusedWindowAttribute ? focusedWindow : name == kAXFocusedUIElementAttribute ? focusedField : nil
+    }, focusRequester: { _ in XCTFail("Must not use AX window focus, which can activate the app") },
+      raiseRequester: { _ in XCTFail("Must not raise") },
+      backgroundFocuser: { requestedWindow, requestedField in
+        requests.append((requestedWindow, requestedField))
+        focusedWindow = requestedWindow
+        focusedField = requestedField
+      })
+
+    try targeting.focusEditableInBackground(field, window: window, app: app)
+
+    XCTAssertEqual(requests.count, 1)
+    XCTAssertTrue(requests.first.map { CFEqual($0.window, window) && CFEqual($0.field, field) } ?? false)
+  }
+
+  @MainActor
+  func testBackgroundFocusFailsWhenTheFieldDoesNotTakeFocus() {
+    let app = AXUIElementCreateApplication(101)
+    let window = AXUIElementCreateApplication(102)
+    let field = AXUIElementCreateApplication(103)
+    let decoy = AXUIElementCreateApplication(104)
+    let targeting = WindowTargeting(attributeReader: { element, name in
+      guard CFEqual(element, app) else { return nil }
+      return name == kAXFocusedWindowAttribute ? window : name == kAXFocusedUIElementAttribute ? decoy : nil
+    }, backgroundFocuser: { _, _ in }, focusPollInterval: 0)
+    XCTAssertThrowsError(try targeting.focusEditableInBackground(field, window: window, app: app)) { error in
       XCTAssertEqual((error as? PilotRuntimeError)?.code, "element_focus_failed")
     }
   }
 
   @MainActor
-  func testTextPreflightRefusesAnotherRootFocusedFieldWithoutRetargeting() {
+  func testBackgroundFocusDoesNotUnminimizeTheWindow() {
     let app = AXUIElementCreateApplication(101)
-    let field = AXUIElementCreateApplication(102)
-    let decoy = AXUIElementCreateApplication(103)
+    let window = AXUIElementCreateApplication(102)
+    let field = AXUIElementCreateApplication(103)
     let targeting = WindowTargeting(attributeReader: { element, name in
-      CFEqual(element, app) && name == kAXFocusedUIElementAttribute ? decoy : nil
-    }, focusRequester: { _ in XCTFail("Must not move focus from the decoy") },
-      raiseRequester: { _ in XCTFail("Must not raise") })
-    XCTAssertThrowsError(try targeting.requireFocusedEditable(field, app: app)) { error in
-      XCTAssertEqual((error as? PilotRuntimeError)?.code, "element_focus_failed")
+      CFEqual(element, window) && name == kAXMinimizedAttribute ? kCFBooleanTrue : nil
+    }, backgroundFocuser: { _, _ in XCTFail("Minimized windows must not be clicked") })
+    XCTAssertThrowsError(try targeting.focusEditableInBackground(field, window: window, app: app)) { error in
+      XCTAssertEqual((error as? PilotRuntimeError)?.code, "window_focus_failed")
     }
   }
 

@@ -45,13 +45,19 @@ final class WindowTargeting {
   private let attributeReader: ((AXUIElement, String) -> CFTypeRef?)?
   private let focusRequester: ((AXUIElement) -> Void)?
   private let raiseRequester: ((AXUIElement) -> Void)?
+  private let backgroundFocuser: ((AXUIElement, AXUIElement) -> Void)?
+  private let focusPollInterval: TimeInterval
 
   init(attributeReader: ((AXUIElement, String) -> CFTypeRef?)? = nil,
        focusRequester: ((AXUIElement) -> Void)? = nil,
-       raiseRequester: ((AXUIElement) -> Void)? = nil) {
+       raiseRequester: ((AXUIElement) -> Void)? = nil,
+       backgroundFocuser: ((AXUIElement, AXUIElement) -> Void)? = nil,
+       focusPollInterval: TimeInterval = 0.05) {
     self.attributeReader = attributeReader
     self.focusRequester = focusRequester
     self.raiseRequester = raiseRequester
+    self.backgroundFocuser = backgroundFocuser
+    self.focusPollInterval = focusPollInterval
   }
 
   func attribute(_ element: AXUIElement, _ name: String) -> CFTypeRef? {
@@ -139,13 +145,32 @@ final class WindowTargeting {
     }
   }
 
-  /// AXFocused writes and AXPress can activate an app; only observe existing focus.
-  func requireFocusedEditable(_ element: AXUIElement, app: AXUIElement) throws {
-    guard let focused = elementAttribute(app, kAXFocusedUIElementAttribute),
-      CFEqual(focused, element) else {
-      throw PilotRuntimeError(code: "element_focus_failed",
-        message: "The requested editable control is not the app's existing keyboard target; no focus was requested and no text was sent.")
+  /// AXFocused writes and AXPress can activate an app, so focus moves through
+  /// SyntheticAppFocus instead. Moves keyboard focus to an editable inside a background app without
+  /// activating, raising, or unminimizing anything. Returns whether focus moved.
+  @discardableResult
+  func focusEditableInBackground(_ element: AXUIElement, window: AXUIElement, app: AXUIElement) throws -> Bool {
+    if hasFocusedEditable(element, window: window, app: app) { return false }
+    guard (attribute(window, kAXMinimizedAttribute) as? Bool) != true else {
+      throw PilotRuntimeError(code: "window_focus_failed",
+        message: "Background text entry cannot target a minimized window; no focus was requested.")
     }
+    if let backgroundFocuser {
+      backgroundFocuser(window, element)
+    } else if let frame = bounds(element) {
+      SyntheticAppFocus.focus(element, in: window, at: CGPoint(x: frame.midX, y: frame.midY))
+    }
+    for _ in 0..<10 {
+      if hasFocusedEditable(element, window: window, app: app) { return true }
+      RunLoop.main.run(until: Date(timeIntervalSinceNow: focusPollInterval))
+    }
+    throw PilotRuntimeError(code: "element_focus_failed",
+      message: "The requested editable control did not take keyboard focus in the background; no text was sent.")
+  }
+
+  private func hasFocusedEditable(_ element: AXUIElement, window: AXUIElement, app: AXUIElement) -> Bool {
+    guard isKeyboardTarget(window, app: app), let focused = elementAttribute(app, kAXFocusedUIElementAttribute) else { return false }
+    return CFEqual(focused, element)
   }
 
   func focus(_ window: AXUIElement, app: AXUIElement, allowRaise: Bool = false) throws {
