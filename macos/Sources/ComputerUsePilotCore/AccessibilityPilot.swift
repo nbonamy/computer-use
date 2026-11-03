@@ -674,25 +674,15 @@ public final class AccessibilityPilot {
     guard let text = arguments["text"]?.stringValue else {
       throw PilotRuntimeError(code: "invalid_request", message: "type_text requires text.")
     }
-    let app = try prepareKeyboardTarget(arguments: arguments)
+    let app = try prepareTextTarget(arguments: arguments)
     let target = try actionElement(arguments: arguments)
     if let target {
       let role = stringAttribute(target, kAXRoleAttribute) ?? ""
       guard [kAXTextFieldRole, kAXTextAreaRole, kAXComboBoxRole].contains(role) else {
         throw PilotRuntimeError(code: "invalid_request", message: "Targeted type_text requires an editable text control.")
       }
-      _ = AXUIElementSetAttributeValue(target, kAXFocusedAttribute as CFString, kCFBooleanTrue)
       let root = preparedRootElement(processIdentifier: app.processIdentifier)
-      if !editableHasFocus(target, app: root) {
-        _ = AXUIElementPerformAction(target, kAXPressAction as CFString)
-      }
-      for _ in 0..<6 {
-        if editableHasFocus(target, app: root) { break }
-        RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.05))
-      }
-      guard editableHasFocus(target, app: root) else {
-        throw PilotRuntimeError(code: "element_focus_failed", message: "The requested editable control did not receive focus; no text was sent.")
-      }
+      try windowTargets.requireFocusedEditable(target, app: root)
     } else if arguments["replace"]?.boolValue == true {
       throw PilotRuntimeError(code: "invalid_request", message: "replace requires element_index or selector.")
     }
@@ -781,7 +771,7 @@ public final class AccessibilityPilot {
     guard ["text", "md", "html"].contains(format) else {
       throw PilotRuntimeError(code: "invalid_request", message: "paste format must be text, md, or html.")
     }
-    let app = try prepareKeyboardTarget(arguments: arguments)
+    let app = try prepareTextTarget(arguments: arguments)
     let restored = try postClipboardText(text, format: format,
       targetPID: app.processIdentifier, arguments: arguments)
     return .object([
@@ -2219,6 +2209,14 @@ public final class AccessibilityPilot {
       // target handles the shortcut, then release our temporary clipboard.
       RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.1))
     }
+  }
+
+  private func prepareTextTarget(arguments: [String: JSONValue]) throws -> NSRunningApplication {
+    let app = try runningApplication(arguments: arguments)
+    let window = try selectedWindow(arguments: arguments)
+    let root = preparedRootElement(processIdentifier: app.processIdentifier)
+    try windowTargets.requireTextTarget(window.element, app: root)
+    return app
   }
 
   private func prepareKeyboardTarget(arguments: [String: JSONValue], foreground: Bool = false) throws -> NSRunningApplication {

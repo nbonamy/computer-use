@@ -130,6 +130,24 @@ final class WindowTargeting {
     elementAttribute(app, kAXFocusedWindowAttribute).map { CFEqual($0, window) } ?? false
   }
 
+  /// Background text preflight never selects, unminimizes, or raises a window.
+  func requireTextTarget(_ window: AXUIElement, app: AXUIElement) throws {
+    guard (attribute(window, kAXMinimizedAttribute) as? Bool) != true,
+      isKeyboardTarget(window, app: app) else {
+      throw PilotRuntimeError(code: "window_focus_failed",
+        message: "Background text entry requires the selected window to be the app's existing keyboard target; no window focus was requested.")
+    }
+  }
+
+  /// AXFocused writes and AXPress can activate an app; only observe existing focus.
+  func requireFocusedEditable(_ element: AXUIElement, app: AXUIElement) throws {
+    guard let focused = elementAttribute(app, kAXFocusedUIElementAttribute),
+      CFEqual(focused, element) else {
+      throw PilotRuntimeError(code: "element_focus_failed",
+        message: "The requested editable control is not the app's existing keyboard target; no focus was requested and no text was sent.")
+    }
+  }
+
   func focus(_ window: AXUIElement, app: AXUIElement, allowRaise: Bool = false) throws {
     if isKeyboardTarget(window, app: app) { return }
     if let focusRequester {

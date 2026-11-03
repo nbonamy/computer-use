@@ -158,11 +158,14 @@ Pass the app selector and selected `window_id` to `type_text`, `press_key`, and
 `paste`. Keyboard events are posted directly to that process after verifying
 the selected window's keyboard focus, without raising the window;
 keyboard typing stops if that window loses focus or the process exits during delivery.
-`type_text` accepts an `element_index` or semantic selector to focus and verify
-an editable control internally. With a target, `replace: true` selects its
+`type_text` accepts an `element_index` or semantic selector to pin an already
+focused editable control. With a target, `replace: true` selects its
 existing text before typing; `submit: true` sends Return afterward. Targeted
 keyboard typing stops if the editable control loses focus. Unknown command arguments
 are rejected rather than silently ignored.
+Text preflight requires the selected window and editable to already hold the
+app's keyboard focus. It does not select or unminimize windows, set `AXFocused`,
+or press controls to establish focus; missing focus returns an error before input.
 
 `type_text` defaults to `method: "paste"`: it inserts the entire string with
 one plain-text clipboard paste, avoiding per-character delays and focus checks.
