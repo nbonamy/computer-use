@@ -1,9 +1,6 @@
 import AppKit
 import ApplicationServices
 
-@_silgen_name("_AXUIElementGetWindow")
-private func _AXUIElementGetWindow(_ element: AXUIElement, _ windowID: UnsafeMutablePointer<CGWindowID>) -> AXError
-
 /// Moves keyboard focus inside a background app without activating it. The app
 /// is told it became active, then receives a click routed to the target window
 /// through its own event queue. WindowServer's frontmost app and the user's
@@ -12,9 +9,16 @@ enum SyntheticAppFocus {
   static let windowUnderPointerField = CGEventField(rawValue: 91)!
   static let windowThatCanHandleEventField = CGEventField(rawValue: 92)!
 
+  private typealias GetWindowFunction = @convention(c) (AXUIElement, UnsafeMutablePointer<CGWindowID>) -> AXError
+
+  /// Private SPI, resolved at runtime so its removal only disables background
+  /// focus instead of preventing the helper from launching.
+  private static let getWindow: GetWindowFunction? = dlsym(UnsafeMutableRawPointer(bitPattern: -2), "_AXUIElementGetWindow")
+    .map { unsafeBitCast($0, to: GetWindowFunction.self) }
+
   static func windowID(of window: AXUIElement) -> CGWindowID? {
     var windowID: CGWindowID = 0
-    guard _AXUIElementGetWindow(window, &windowID) == .success, windowID != 0 else { return nil }
+    guard let getWindow, getWindow(window, &windowID) == .success, windowID != 0 else { return nil }
     return windowID
   }
 
