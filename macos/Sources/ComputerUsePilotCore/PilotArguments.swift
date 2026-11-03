@@ -12,7 +12,7 @@ enum PilotArguments {
       "screenshot": ["scope", "displayId"],
       "click": indexed.union(["x", "y", "click_count", "mouse_button", "physical"]),
       "dismiss": indexed, "set_value": indexed.union(["value", "text"]),
-      "type_text": indexed.union(["text", "replace", "submit", "method"]),
+      "type_text": indexed.union(["text", "replace", "submit"]),
       "press_key": ["key"], "paste": ["text", "format"],
       "scroll": indexed.union(["direction", "pages"]),
       "drag": ["from_x", "from_y", "to_x", "to_y"],
@@ -23,10 +23,6 @@ enum PilotArguments {
     let unknown = Set(arguments.keys).subtracting(target.union(allowed)).sorted()
     guard unknown.isEmpty else {
       throw PilotRuntimeError(code: "invalid_request", message: "Unknown arguments for \(command): \(unknown.joined(separator: ", ")).")
-    }
-    if command == "type_text", let method = arguments["method"],
-       method.stringValue.map({ ["paste", "keyboard"].contains($0) }) != true {
-      throw PilotRuntimeError(code: "invalid_request", message: "type_text method must be paste or keyboard.")
     }
     for key in ["replace", "submit", "physical", "includeScreenshot", "disableDiff"] {
       if let value = arguments[key], value.boolValue == nil {

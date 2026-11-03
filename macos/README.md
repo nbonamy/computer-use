@@ -171,22 +171,12 @@ unless `replace` is set. Minimized windows are refused, and focus that does not
 move returns an error before input. Untargeted text requires the selected window
 to already hold the app's keyboard focus.
 
-`type_text` defaults to `method: "paste"`: it inserts the entire string with
-one plain-text clipboard paste, avoiding per-character delays and focus checks.
-The selected window and targeted control are verified before pasting and before
-an optional Return. The previous clipboard contents are restored unless another
-process changed them during the operation. Results retain `charactersTyped`
-and report `method` plus `clipboardRestored` when a paste was performed.
-The snapshot preserves every item and its formats, including image and binary
-data. If any format cannot be read, the command returns
-`clipboard_snapshot_failed` before replacing the clipboard. A failed restore
-returns `clipboard_restore_failed` rather than reporting success.
+`type_text` types text as keystrokes, which background apps accept silently;
+they usually reject a synthetic paste with a system beep. Tabs and newlines send
+Tab and Return. The selected window and targeted control are verified before
+typing and before an optional Return. Results report `charactersTyped`.
 An empty string inserts nothing; `replace` and `submit` still apply.
-
-Use `method: "keyboard"` for controls that reject paste or require individual
-keyboard events. In keyboard mode, tabs and newlines send Tab and Return;
-paste mode inserts them as text. Consumers can use `set_value` for ordinary
-settable controls.
+Consumers can use `set_value` for ordinary settable controls.
 
 `press_key` accepts a key or `+`-separated chord using X keysym-style names,
 for example `Return`, `Control_L+a`, or `Super_L+v`. Common aliases such as
@@ -194,9 +184,12 @@ for example `Return`, `Control_L+a`, or `Super_L+v`. Common aliases such as
 
 `drag` accepts `from_x`, `from_y`, `to_x`, and `to_y` in macOS global logical
 screen coordinates. `perform_secondary_action` accepts an action advertised on
-the element in the latest state. `paste` accepts `text`, `md`, or `html`, uses
-the system paste command, and restores the previous pasteboard only if nothing
-else changed it during the operation. `select_text` selects an exact match in
+the element in the latest state. `paste` inserts formatted `md` or `html` (or plain
+`text`) with the system paste command, which apps usually accept only while in
+the foreground. It snapshots every pasteboard item and format first, returning
+`clipboard_snapshot_failed` before replacing anything it cannot read, and
+restores the snapshot only if nothing else changed the pasteboard meanwhile; a
+failed restore returns `clipboard_restore_failed`. `select_text` selects an exact match in
 an indexed editable element, with optional `prefix`, `suffix`, and
 `selection_type` (`text`, `cursor_before`, or `cursor_after`).
 

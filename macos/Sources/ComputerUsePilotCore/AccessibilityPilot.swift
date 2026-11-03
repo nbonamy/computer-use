@@ -697,23 +697,13 @@ public final class AccessibilityPilot {
     if arguments["replace"]?.boolValue == true {
       postKeyboardChord(try KeyboardChord.parse("Super_L+a"), targetPID: app.processIdentifier)
     }
-    let method = arguments["method"]?.stringValue ?? "paste"
-    var result: [String: JSONValue] = [
-      "charactersTyped": .number(Double(text.count)),
-      "method": .string(method),
-      "success": .bool(true)
-    ]
-    if method == "keyboard" {
-      try postKeyboardText(text, targetPID: app.processIdentifier, arguments: arguments, expectedElement: target)
-    } else if !text.isEmpty {
-      result["clipboardRestored"] = .bool(try postClipboardText(text, format: "text",
-        targetPID: app.processIdentifier, arguments: arguments, expectedElement: target))
-    }
+    // Background apps reject a synthetic Cmd+V with a system beep; keystrokes land.
+    try postKeyboardText(text, targetPID: app.processIdentifier, arguments: arguments, expectedElement: target)
     if arguments["submit"]?.boolValue == true {
       try requireKeyboardFocus(targetPID: app.processIdentifier, arguments: arguments, expectedElement: target)
       postKeyboardChord(try KeyboardChord.parse("Return"), targetPID: app.processIdentifier)
     }
-    return .object(result)
+    return .object(["charactersTyped": .number(Double(text.count)), "success": .bool(true)])
   }
 
   private func pressKey(arguments: [String: JSONValue]) throws -> JSONValue {
