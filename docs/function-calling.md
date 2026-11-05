@@ -44,7 +44,7 @@ commands. Each tool maps to one Pilot method.
 | `computer_use_click` | `click` | Activate a fresh accessibility element or a coordinate target. | app selector plus `element_index`, or `x` and `y`; optional `physical` |
 | `computer_use_dismiss` | `dismiss` | Dismiss an active native menu or popover with `AXCancel`. | app selector and optional accessibility scope or semantic selector |
 | `computer_use_press_key` | `press_key` | Press a key or keyboard chord. | app selector, `key` |
-| `computer_use_type_text` | `type_text` | Insert plain text using clipboard paste by default. | app selector, `text`, optional target, `replace?`, `submit?`, `method?` |
+| `computer_use_type_text` | `type_text` | Enter plain text with keyboard events. | app selector, `text`, optional target, `replace?`, `submit?` |
 | `computer_use_set_value` | `set_value` | Set `AXValue` on a normal settable element. | app selector, `element_index`, `value` |
 | `computer_use_scroll` | `scroll` | Scroll an element or the current view. | app selector, `element_index?`, direction or deltas |
 | `computer_use_drag` | `drag` | Drag between foreground screen coordinates. | app selector, `from_x`, `from_y`, `to_x`, `to_y` |
@@ -176,16 +176,18 @@ structured JSON. When it is unavailable, keep using the returned Accessibility
 state and surface `screenshotError` only when vision is actually required.
 
 Use `type_text` for browser address bars, rich web editors, and other text
-controls. Its default `method: "paste"` inserts plain text in one clipboard
-operation and restores the previous clipboard unless another process changed
-it. All clipboard items and readable formats are preserved, including images
-and custom binary data. An unreadable format returns `clipboard_snapshot_failed`
-before the clipboard is replaced; a restore failure returns
-`clipboard_restore_failed`. Targeted focus, `replace`, and `submit` are supported. Expose the optional
-`method` argument so the agent can choose `"keyboard"` for controls that reject
-paste or need individual keystrokes. Tabs and newlines are literal text in paste
-mode; keyboard mode sends Tab and Return. The response retains `charactersTyped`
-and adds `method` and, when pasting, `clipboardRestored`.
+controls. It sends keyboard events without touching the clipboard. Targeted
+focus, `replace`, and `submit` are supported; tabs and newlines send Tab and
+Return. The response reports `charactersTyped`. Do not expose a `method`
+argument: `type_text` accepts only keystroke delivery.
+
+Use the separate `paste` command for clipboard insertion, including Markdown
+and HTML. It is generally accepted only while the target app is in the
+foreground. All readable clipboard items and formats are preserved, including
+images and custom binary data. An unreadable format returns
+`clipboard_snapshot_failed` before the clipboard is replaced; a restore failure
+returns `clipboard_restore_failed`. Results report `charactersPasted`, `format`,
+and `clipboardRestored`.
 Use `set_value` for ordinary settable accessibility controls.
 Keep raw trees, structured element arrays,
 and debug fields opt-in because they can consume significant context.
