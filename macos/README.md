@@ -31,7 +31,7 @@ Optional `--output /absolute/path` selects the output directory. The command pri
 
 Every request has an `id`, `command`, and optional `arguments`. Every response repeats the `id` and has either `ok: true` with `result`, or `ok: false` with a stable structured error.
 
-`status` reports the release version as `3.2.0`. This is diagnostic product
+`status` reports the release version as `3.2.1`. This is diagnostic product
 metadata, not a negotiated protocol version: a consumer ships the exact helper
 binary and adapter it was built against as one release unit.
 
