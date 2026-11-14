@@ -61,10 +61,32 @@ enum SyntheticAppFocus {
       data1: 0, data2: 0)?.cgEvent
   }
 
+  private typealias SetWindowLocationFunction = @convention(c) (CGEvent, CGPoint) -> Void
+  private static let setWindowLocation: SetWindowLocationFunction? =
+    (dlsym(UnsafeMutableRawPointer(bitPattern: -2), "CGEventSetWindowLocation") ?? skyLightSymbol("CGEventSetWindowLocation"))
+      .map { unsafeBitCast($0, to: SetWindowLocationFunction.self) }
+
+  /// macOS 27 hit-tests a pid-routed click at its window-location stamp, read
+  /// as a window-local point from the top-left; earlier releases expected the
+  /// screen point there.
+  static func windowLocation(of point: CGPoint, inWindowBounds bounds: CGRect, osMajorVersion: Int) -> CGPoint {
+    osMajorVersion >= 27 ? CGPoint(x: point.x - bounds.minX, y: point.y - bounds.minY) : point
+  }
+
+  private static func windowBounds(_ windowID: CGWindowID) -> CGRect? {
+    guard let info = (CGWindowListCopyWindowInfo(.optionIncludingWindow, windowID) as? [[String: Any]])?.first,
+      let dictionary = info[kCGWindowBounds as String] as? NSDictionary else { return nil }
+    var bounds = CGRect.zero
+    return CGRectMakeWithDictionaryRepresentation(dictionary as CFDictionary, &bounds) ? bounds : nil
+  }
+
   /// AppKit routes pid-targeted mouse events by their window number, not by
   /// what is on screen under the shared pointer.
   static func clickEvents(at point: CGPoint, windowID: CGWindowID) -> [CGEvent] {
-    [NSEvent.EventType.leftMouseDown, .leftMouseUp].compactMap { type in
+    let stamp = windowBounds(windowID).map {
+      windowLocation(of: point, inWindowBounds: $0, osMajorVersion: ProcessInfo.processInfo.operatingSystemVersion.majorVersion)
+    }
+    return [NSEvent.EventType.leftMouseDown, .leftMouseUp].compactMap { type in
       guard let event = NSEvent.mouseEvent(with: type, location: .zero, modifierFlags: [],
         timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: Int(windowID), context: nil,
         eventNumber: 0, clickCount: 1, pressure: type == .leftMouseDown ? 1 : 0)?.cgEvent else { return nil }
@@ -73,6 +95,7 @@ enum SyntheticAppFocus {
       event.setIntegerValueField(windowUnderPointerField, value: Int64(windowID))
       event.setIntegerValueField(windowThatCanHandleEventField, value: Int64(windowID))
       event.location = point
+      if let stamp, let setWindowLocation { setWindowLocation(event, stamp) }
       return event
     }
   }
@@ -122,24 +145,84 @@ enum SyntheticAppFocus {
   /// of the panel's labels, then give the front process back to the app the
   /// user was in before it can repaint (about 40 ms).
   static func focusRemotePanel(panelPID: pid_t, windowID: CGWindowID, at point: CGPoint) {
-    let userFront = frontPID()
-    let userWindow = userFront.flatMap { pid -> CGWindowID? in
-      var focused: CFTypeRef?
-      guard AXUIElementCopyAttributeValue(AXUIElementCreateApplication(pid), kAXFocusedWindowAttribute as CFString, &focused) == .success,
-        let focused, CFGetTypeID(focused) == AXUIElementGetTypeID() else { return nil }
-      return self.windowID(of: focused as! AXUIElement)
-    }
+    let front = FrontSnapshot.capture()
     for event in clickEvents(at: point, windowID: windowID) {
       event.postToPid(panelPID)
       usleep(20_000)
     }
-    guard let userFront, let userWindow else { return }
     for _ in 0..<60 {
-      if let front = frontPID(), front != userFront {
-        returnFront(to: userFront, window: userWindow)
-        return
-      }
+      if front.restoreIfTaken() { return }
       usleep(5_000)
+    }
+  }
+
+  /// The app and window the user is in, to hand the front back to them if a
+  /// background action makes another app frontmost.
+  final class FrontSnapshot {
+    let pid: pid_t?
+    let window: CGWindowID?
+    let windowElement: AXUIElement?
+    let wasOnTop: Bool
+    private var raisedAt: Date?
+
+    init(pid: pid_t?, window: CGWindowID?, windowElement: AXUIElement?, wasOnTop: Bool) {
+      self.pid = pid
+      self.window = window
+      self.windowElement = windowElement
+      self.wasOnTop = wasOnTop
+    }
+
+    static func capture() -> FrontSnapshot {
+      let pid = SyntheticAppFocus.frontPID()
+      let element = pid.flatMap { pid -> AXUIElement? in
+        var focused: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(AXUIElementCreateApplication(pid), kAXFocusedWindowAttribute as CFString, &focused) == .success,
+          let focused, CFGetTypeID(focused) == AXUIElementGetTypeID() else { return nil }
+        return (focused as! AXUIElement)
+      }
+      let window = element.flatMap { SyntheticAppFocus.windowID(of: $0) }
+      return FrontSnapshot(pid: pid, window: window, windowElement: element,
+        wasOnTop: window != nil && onScreenOrder().first == window)
+    }
+
+    /// Whether the user's window, on top before, now has another window above it.
+    static func windowCovered(window: CGWindowID, wasOnTop: Bool, order: [CGWindowID]) -> Bool {
+      wasOnTop && order.first != window
+    }
+
+    /// Normal-level on-screen windows, front to back.
+    private static func onScreenOrder() -> [CGWindowID] {
+      (CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]] ?? [])
+        .filter { ($0[kCGWindowLayer as String] as? Int) == 0 }
+        .compactMap { ($0[kCGWindowNumber as String] as? NSNumber)?.uint32Value }
+    }
+
+    /// Restores now and once more after window ordering has settled.
+    @MainActor
+    func restoreSettled() {
+      restoreIfTaken()
+      RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.12))
+      restoreIfTaken()
+    }
+
+    /// Hands the front back if another app took it, and raises the user's
+    /// window back if a background app's menu ordered its window above it.
+    @discardableResult
+    func restoreIfTaken() -> Bool {
+      guard let pid, let window else { return false }
+      if let front = SyntheticAppFocus.frontPID(), front != pid {
+        SyntheticAppFocus.returnFront(to: pid, window: window)
+        return true
+      }
+      // The user's app handles an AXRaise on its own schedule; ask once and
+      // let it land rather than queueing more requests behind it.
+      if Self.windowCovered(window: window, wasOnTop: wasOnTop, order: Self.onScreenOrder()), let windowElement,
+        raisedAt.map({ Date().timeIntervalSince($0) > 0.15 }) ?? true {
+        raisedAt = Date()
+        _ = AXUIElementPerformAction(windowElement, kAXRaiseAction as CFString)
+        return true
+      }
+      return false
     }
   }
 

@@ -40,6 +40,7 @@ public final class AccessibilityPilot {
   private var elementBuckets: [CFHashCode: [(index: Int, element: AXUIElement)]] = [:]
   private var latestObservedElementIDsByPID: [pid_t: Set<Int>] = [:]
   private var nextElementIndex = 0
+  private var lastTypeAheadAt: Date?
   private var pendingSettleAtByPID: [pid_t: Date] = [:]
   private var didPresentInitialCursor = false
 
@@ -122,6 +123,8 @@ public final class AccessibilityPilot {
       return actionGuard(id: request.id, arguments: request.arguments) { try selectText(arguments: request.arguments) }
     case "set_value":
       return actionGuard(id: request.id, arguments: request.arguments) { try setValue(arguments: request.arguments) }
+    case "select_option":
+      return actionGuard(id: request.id, arguments: request.arguments) { try selectOption(arguments: request.arguments) }
     case "scroll":
       return actionGuard(id: request.id, arguments: request.arguments) { try scroll(arguments: request.arguments) }
     default:
@@ -144,7 +147,7 @@ public final class AccessibilityPilot {
     case "screenshot":
       return (request.arguments["scope"]?.stringValue ?? "window") == "window"
     case "focus_app", "click", "dismiss", "type_text", "press_key", "drag",
-         "perform_secondary_action", "paste", "select_text", "set_value", "scroll":
+         "perform_secondary_action", "paste", "select_text", "set_value", "select_option", "scroll":
       return true
     default:
       return false
@@ -477,10 +480,22 @@ public final class AccessibilityPilot {
       observedElementIDs: &observedElementIDs,
       insideWebContent: hasWebAreaAncestor(root)
     )
-    latestObservedElementIDsByPID[app.processIdentifier] = observedElementIDs
-    let focusedElement = elements.first { element in
-      element.objectValue?["focused"]?.boolValue == true
-    } ?? .null
+    latestObservedElementIDsByPID[app.processIdentifier] = Self.observedElementIDs(
+      previous: latestObservedElementIDsByPID[app.processIdentifier], observed: observedElementIDs,
+      scoped: scopedRoot.requestedIndex != nil)
+    if !includeMacChrome, let index = scopedRoot.requestedIndex {
+      addPopUpOptions(index: index, rows: &stateRows, elements: &elements, app: app, arguments: arguments)
+    }
+    // A web page can keep its DOM focus flag while the browser's address bar
+    // holds the keyboard; the app's focused element is what receives keys.
+    let keyboardFocusIndex = (try? copyElementAttribute(preparedRootElement(processIdentifier: app.processIdentifier),
+      kAXFocusedUIElementAttribute as String))
+      .map { String(stableElementIndex(for: $0)) }
+    let focusedElement = (keyboardFocusIndex.flatMap { index in
+      elements.first { $0.objectValue?["index"]?.stringValue == index }
+    } ?? elements.first { element in
+      keyboardFocusIndex == nil && element.objectValue?["focused"]?.boolValue == true
+    }) ?? .null
     let focusedElementText = focusedElement.objectValue.map { "Focused element: \(elementLine($0))" }
     let header = appStateHeader(app: app, root: appRoot)
     var footer: [String] = []
@@ -675,11 +690,12 @@ public final class AccessibilityPilot {
     guard let text = arguments["text"]?.stringValue else {
       throw PilotRuntimeError(code: "invalid_request", message: "type_text requires text.")
     }
-    let target = try actionElement(arguments: arguments)
+    var target = try actionElement(arguments: arguments)
+    let textRoles = [kAXTextFieldRole, kAXTextAreaRole, kAXComboBoxRole]
     let app: NSRunningApplication
     if let target {
       let role = stringAttribute(target, kAXRoleAttribute) ?? ""
-      guard [kAXTextFieldRole, kAXTextAreaRole, kAXComboBoxRole].contains(role) else {
+      guard textRoles.contains(role) else {
         throw PilotRuntimeError(code: "invalid_request", message: "Targeted type_text requires an editable text control.")
       }
       app = try runningApplication(arguments: arguments)
@@ -693,12 +709,28 @@ public final class AccessibilityPilot {
       throw PilotRuntimeError(code: "invalid_request", message: "replace requires element_index or selector.")
     } else {
       app = try prepareTextTarget(arguments: arguments)
+      // Keys go to the app's focused element, which can differ from what a web
+      // page marks as focused (a browser's address bar). Type only into a text
+      // input, and keep verifying that exact element while typing.
+      let focused = try? copyElementAttribute(preparedRootElement(processIdentifier: app.processIdentifier),
+        kAXFocusedUIElementAttribute as String)
+      guard let focused, textRoles.contains(stringAttribute(focused, kAXRoleAttribute) ?? "") else {
+        let line = focused.map { elementLine(compactElementSummary(describeElement($0, path: "focused").objectValue ?? [:])) }
+        throw PilotRuntimeError(code: "element_focus_failed",
+          message: "Untargeted type_text needs keyboard focus in a text field\(line.map { "; keyboard focus is on \($0)" } ?? ""). Pass the field's element_index; no text was sent.")
+      }
+      target = focused
     }
     try requireKeyboardFocus(targetPID: app.processIdentifier, arguments: arguments, expectedElement: target)
-    if arguments["replace"]?.boolValue == true {
-      let remotePanel = try keyboardProcess(targetPID: app.processIdentifier, arguments: arguments) != app.processIdentifier
-      if !(remotePanel && target.map(selectAllText) == true) {
+    if arguments["replace"]?.boolValue == true, let target, !(stringAttribute(target, kAXValueAttribute) ?? "").isEmpty {
+      // Cmd+A applies asynchronously in web views: the first typed key could
+      // land before the selection and be replaced by the next one. Select
+      // through accessibility, and confirm the selection before typing.
+      if !(selectAllText(target) && waitForWholeValueSelected(target)) {
         try postKeyboardChord(try KeyboardChord.parse("Super_L+a"), targetPID: app.processIdentifier, arguments: arguments)
+        guard waitForWholeValueSelected(target) else {
+          throw PilotRuntimeError(code: "action_unavailable", message: "The existing text could not be selected for replacement; no text was sent.")
+        }
       }
     }
     // Background apps reject a synthetic Cmd+V with a system beep; keystrokes land.
@@ -707,7 +739,81 @@ public final class AccessibilityPilot {
       try requireKeyboardFocus(targetPID: app.processIdentifier, arguments: arguments, expectedElement: target)
       try postKeyboardChord(try KeyboardChord.parse("Return"), targetPID: app.processIdentifier, arguments: arguments)
     }
-    return .object(["charactersTyped": .number(Double(text.count)), "success": .bool(true)])
+    var result: [String: JSONValue] = ["charactersTyped": .number(Double(text.count)), "success": .bool(true)]
+    if let target { result["target"] = describeElement(target, path: "target") }
+    return .object(result)
+  }
+
+  /// Chooses a pop-up button's option by its title, keeping the user's app in
+  /// front. A labeled web <select> takes the typed title with nothing shown;
+  /// anything else has its menu opened for an instant.
+  private func selectOption(arguments: [String: JSONValue]) throws -> JSONValue {
+    let option = arguments["option"]?.stringValue ?? ""
+    guard let target = try actionElement(arguments: arguments) else {
+      throw PilotRuntimeError(code: "invalid_request", message: "select_option requires element_index or selector.")
+    }
+    guard stringAttribute(target, kAXRoleAttribute) == kAXPopUpButtonRole else {
+      throw PilotRuntimeError(code: "invalid_request", message: "select_option requires a pop-up button such as a web <select>.")
+    }
+    let matches = { (value: String?) in PopUpOptions.titleMatches(value, option) }
+    let previous = stringAttribute(target, kAXValueAttribute) ?? ""
+    if matches(previous) {
+      return .object(["value": .string(previous), "previousValue": .string(previous), "success": .bool(true)])
+    }
+    let app = try runningApplication(arguments: arguments)
+    let window = try selectedWindow(arguments: arguments)
+    let result = { (value: String) -> JSONValue in
+      .object(["value": .string(value), "previousValue": .string(previous), "success": .bool(true)])
+    }
+    // Silent route: a web <select> focused through its label takes the typed
+    // title, with nothing shown on screen.
+    if hasWebAreaAncestor(target), let label = try? copyElementAttribute(target, kAXTitleUIElementAttribute as String),
+      let value = try? selectByTypeAhead(target, label: label, option: option, app: app, window: window.element, arguments: arguments),
+      matches(value) {
+      return result(value)
+    }
+    // Menu route: open the menu for an instant and press the matching item.
+    let front = SyntheticAppFocus.FrontSnapshot.capture()
+    defer { front.restoreSettled() }
+    guard let menu = PopUpOptions.open(target, window: window.element, front: front) else {
+      throw PilotRuntimeError(code: "action_unavailable", message: "The dropdown's menu did not open; no option was chosen.")
+    }
+    let titles = menu.items.map(\.title)
+    // With no match, put back the previous option if type-ahead moved it.
+    let choice = PopUpOptions.matchingIndex(of: option, in: titles)
+      ?? PopUpOptions.matchingIndex(of: previous, in: titles).flatMap { stringAttribute(target, kAXValueAttribute) != previous ? $0 : nil }
+    if let choice {
+      _ = AXUIElementPerformAction(menu.items[choice].element, kAXPressAction as CFString)
+    } else {
+      PopUpOptions.close(menu.menu, pid: app.processIdentifier)
+    }
+    for _ in 0..<20 {
+      if let value = stringAttribute(target, kAXValueAttribute), matches(value) { return result(value) }
+      RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.025))
+    }
+    let current = stringAttribute(target, kAXValueAttribute) ?? ""
+    throw PilotRuntimeError(code: "option_not_found",
+      message: "No option titled \"\(option)\"; the value is \"\(current)\". Options: \(titles.joined(separator: " | ")).")
+  }
+
+  /// Focuses a web <select> by clicking its label (a click on the control
+  /// would open its menu) and types the title; returns the resulting value.
+  private func selectByTypeAhead(_ target: AXUIElement, label: AXUIElement, option: String,
+    app: NSRunningApplication, window: AXUIElement, arguments: [String: JSONValue]) throws -> String? {
+    try windowTargets.focusEditableInBackground(target, window: window,
+      app: preparedRootElement(processIdentifier: app.processIdentifier), clicking: label)
+    try requireKeyboardFocus(targetPID: app.processIdentifier, arguments: arguments, expectedElement: target)
+    // Type-ahead joins keys typed within about a second into one search.
+    if let last = lastTypeAheadAt, Date().timeIntervalSince(last) < 1.1 {
+      RunLoop.main.run(until: last.addingTimeInterval(1.1))
+    }
+    try postKeyboardText(option, targetPID: app.processIdentifier, arguments: arguments, expectedElement: target)
+    lastTypeAheadAt = Date()
+    for _ in 0..<32 {
+      if let value = stringAttribute(target, kAXValueAttribute), PopUpOptions.titleMatches(value, option) { return value }
+      RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.025))
+    }
+    return stringAttribute(target, kAXValueAttribute)
   }
 
   private func pressKey(arguments: [String: JSONValue]) throws -> JSONValue {
@@ -1841,6 +1947,37 @@ public final class AccessibilityPilot {
     )
   }
 
+  private func observedElement(_ index: Int) -> AXUIElement? {
+    elementBuckets.values.lazy.flatMap { $0 }.first { $0.index == index }?.element
+  }
+
+  /// Inspecting one pop-up button (rootElementIndex) lists its choices on its
+  /// line. They exist only while its menu is open, so the menu is opened for
+  /// an instant and closed; a full observation never opens menus.
+  private func addPopUpOptions(index: Int, rows: inout [AccessibilityStateRow], elements: inout [JSONValue],
+    app: NSRunningApplication, arguments: [String: JSONValue]) {
+    guard let button = observedElement(index), stringAttribute(button, kAXRoleAttribute) == kAXPopUpButtonRole,
+      let window = try? selectedWindow(arguments: arguments),
+      let options = PopUpOptions.options(of: button, window: window.element, pid: app.processIdentifier),
+      !options.isEmpty else { return }
+    rows = rows.map { row in
+      guard row.elementIndex == index else { return row }
+      return AccessibilityStateRow(elementIndex: row.elementIndex, line: PopUpOptions.line(row.line, options: options),
+        parentElementIndex: row.parentElementIndex, siblingIndex: row.siblingIndex)
+    }
+    elements = elements.map { element in
+      guard var summary = element.objectValue, summary["index"]?.stringValue == String(index) else { return element }
+      summary["options"] = .array(options.map { .string($0) })
+      return .object(summary)
+    }
+  }
+
+  /// A read scoped to one element (rootElementIndex) adds to the indices the
+  /// caller may act on; only a full read replaces them.
+  nonisolated static func observedElementIDs(previous: Set<Int>?, observed: Set<Int>, scoped: Bool) -> Set<Int> {
+    scoped ? (previous ?? []).union(observed) : observed
+  }
+
   /// A scoped observation (rootElementIndex) can start inside a web page.
   private func hasWebAreaAncestor(_ element: AXUIElement) -> Bool {
     var current = element
@@ -2295,6 +2432,19 @@ public final class AccessibilityPilot {
         windowTargets.attribute(focused, kAXRoleAttribute) as? String == kAXTextFieldRole { return }
       RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.025))
     }
+  }
+
+  private func waitForWholeValueSelected(_ element: AXUIElement) -> Bool {
+    for _ in 0..<20 {
+      let length = (stringAttribute(element, kAXValueAttribute) as NSString?)?.length ?? 0
+      var range = CFRange(location: 0, length: 0)
+      var value: CFTypeRef?
+      if AXUIElementCopyAttributeValue(element, kAXSelectedTextRangeAttribute as CFString, &value) == .success,
+        let value, CFGetTypeID(value) == AXValueGetTypeID(), AXValueGetValue(value as! AXValue, .cfRange, &range),
+        range.location == 0, range.length == length { return true }
+      RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.015))
+    }
+    return false
   }
 
   /// Selects a field's whole value through accessibility; a background

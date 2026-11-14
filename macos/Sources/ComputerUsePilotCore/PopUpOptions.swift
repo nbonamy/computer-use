@@ -1,0 +1,115 @@
+import ApplicationServices
+import CoreGraphics
+import Foundation
+
+/// A pop-up button (an AppKit NSPopUpButton or a web <select>) exposes its
+/// choices only while its menu is open. The menu is opened for an instant to
+/// read them, then closed; the user's front app is kept in front throughout.
+enum PopUpOptions {
+  /// Where to click a <select>'s label: its center, or, when the label wraps
+  /// the control, the label's own text beside it. Nil when no such strip exists.
+  static func labelClickPoint(label: CGRect, control: CGRect) -> CGPoint? {
+    guard label.intersects(control) else { return CGPoint(x: label.midX, y: label.midY) }
+    let left = control.minX - label.minX
+    let right = label.maxX - control.maxX
+    if left >= 8 { return CGPoint(x: label.minX + left / 2, y: control.midY) }
+    if right >= 8 { return CGPoint(x: control.maxX + right / 2, y: control.midY) }
+    return nil
+  }
+
+  static func line(_ line: String, options: [String]) -> String {
+    "\(line) options=\(options.joined(separator: "|"))"
+  }
+
+  static func matchingIndex(of option: String, in titles: [String]) -> Int? {
+    titles.firstIndex { titleMatches($0, option) }
+  }
+
+  static func titleMatches(_ title: String?, _ option: String) -> Bool {
+    title?.trimmingCharacters(in: .whitespaces)
+      .caseInsensitiveCompare(option.trimmingCharacters(in: .whitespaces)) == .orderedSame
+  }
+
+  /// AppKit puts the open menu under the button; WebKit adds a new menu
+  /// elsewhere in the page.
+  static func openedMenu(ownMenus: [AXUIElement], before: [AXUIElement], after: [AXUIElement]) -> AXUIElement? {
+    ownMenus.first ?? after.first { menu in !before.contains { CFEqual($0, menu) } }
+  }
+
+  struct Menu {
+    let menu: AXUIElement
+    let items: [(title: String, element: AXUIElement)]
+  }
+
+  /// Opens the button's menu and returns it with its items, still open.
+  @MainActor
+  static func open(_ button: AXUIElement, window: AXUIElement, front: SyntheticAppFocus.FrontSnapshot? = nil) -> Menu? {
+    let before = menus(in: window)
+    guard AXUIElementPerformAction(button, kAXPressAction as CFString) == .success else { return nil }
+    // Opening the menu orders the app's window group above the user's window;
+    // put the user's window back the moment that happens. Searching the page
+    // for the menu is slower, so it runs every 20 ms only.
+    let deadline = Date().addingTimeInterval(0.6)
+    var nextSearch = Date()
+    while Date() < deadline {
+      front?.restoreIfTaken()
+      RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.002))
+      guard Date() >= nextSearch else { continue }
+      nextSearch = Date().addingTimeInterval(0.02)
+      let own = children(button).filter { role($0) == kAXMenuRole }
+      if let menu = openedMenu(ownMenus: own, before: before, after: own.isEmpty ? menus(in: window) : []) {
+        let items = children(menu).filter { role($0) == kAXMenuItemRole }.compactMap { item in
+          string(item, kAXTitleAttribute).map { (title: $0, element: item) }
+        }
+        if !items.isEmpty { return Menu(menu: menu, items: items) }
+      }
+    }
+    return nil
+  }
+
+  /// Reads the button's choices: opens its menu, reads, closes it.
+  @MainActor
+  static func options(of button: AXUIElement, window: AXUIElement, pid: pid_t) -> [String]? {
+    let front = SyntheticAppFocus.FrontSnapshot.capture()
+    defer { front.restoreSettled() }
+    guard let menu = open(button, window: window, front: front) else { return nil }
+    close(menu.menu, pid: pid)
+    return menu.items.map(\.title)
+  }
+
+  @MainActor
+  static func close(_ menu: AXUIElement, pid: pid_t) {
+    if AXUIElementPerformAction(menu, kAXCancelAction as CFString) != .success {
+      for event in (try? KeyboardChord.parse("Escape").events()) ?? [] { event.postToPid(pid) }
+    }
+    RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.05))
+  }
+
+  /// Menus in the window, without descending into them. Bounded for large pages.
+  private static func menus(in window: AXUIElement) -> [AXUIElement] {
+    var found: [AXUIElement] = []
+    var queue = children(window)
+    var visited = 0
+    while !queue.isEmpty, visited < 4000 {
+      let element = queue.removeFirst()
+      visited += 1
+      if role(element) == kAXMenuRole { found.append(element); continue }
+      queue.append(contentsOf: children(element))
+    }
+    return found
+  }
+
+  private static func children(_ element: AXUIElement) -> [AXUIElement] {
+    var value: CFTypeRef?
+    guard AXUIElementCopyAttributeValue(element, kAXChildrenAttribute as CFString, &value) == .success else { return [] }
+    return value as? [AXUIElement] ?? []
+  }
+
+  private static func role(_ element: AXUIElement) -> String? { string(element, kAXRoleAttribute) }
+
+  private static func string(_ element: AXUIElement, _ name: String) -> String? {
+    var value: CFTypeRef?
+    guard AXUIElementCopyAttributeValue(element, name as CFString, &value) == .success else { return nil }
+    return value as? String
+  }
+}

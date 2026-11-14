@@ -40,7 +40,7 @@ The public command surface is:
 - `status`, `request_accessibility`, `request_screen_capture`
 - `list_apps`, `list_windows`, `find_apps`, `launch_app`, `focus_app`
 - `screenshot`
-- `get_app_state`, `click`, `dismiss`, `type_text`, `set_value`, `scroll`
+- `get_app_state`, `click`, `dismiss`, `type_text`, `set_value`, `select_option`, `scroll`
 - `press_key`, `drag`, `perform_secondary_action`, `paste`, `select_text`
 
 The helper is stateful. Consumers must reuse one process for an active Computer
@@ -175,7 +175,10 @@ control, routed to its own event queue. The user's frontmost app, window order,
 and pointer stay unchanged, and new text is appended after existing content
 unless `replace` is set. Minimized windows are refused, and focus that does not
 move returns an error before input. Untargeted text requires the selected window
-to already hold the app's keyboard focus.
+to already hold the app's keyboard focus, on a text field; the result's `target`
+names the control that received the text. The state's `Focused element` is the
+control that receives keys, which can differ from a web page's own focused field
+when the browser's address bar holds the keyboard.
 
 File pickers work in background apps. Press `Super+Shift+g`, type the full path
 into the Go To field with `type_text` (`replace` and `submit` work as usual),
@@ -188,7 +191,15 @@ they usually reject a synthetic paste with a system beep. Tabs and newlines send
 Tab and Return. The selected window and targeted control are verified before
 typing and before an optional Return. Results report `charactersTyped`.
 An empty string inserts nothing; `replace` and `submit` still apply.
-Consumers can use `set_value` for ordinary settable controls.
+Consumers can use `set_value` for ordinary settable controls. `select_option`
+chooses a pop-up button's option by its title, in native apps and web pages,
+and returns `value` and `previousValue`. A labeled web `<select>` is set without
+showing anything; otherwise the menu opens for an instant and the matching item
+is pressed, while the app you are using stays in front. An unknown title fails
+with `option_not_found`, keeps the previous option, and lists the choices.
+Reading one pop-up button with `get_app_state` and `rootElementIndex` lists its
+choices on its line (`options=Refund|Apology|Other`); a full observation never
+opens menus.
 
 `press_key` accepts a key or `+`-separated chord using X keysym-style names,
 for example `Return`, `Control_L+a`, or `Super_L+v`. Common aliases such as

@@ -17,7 +17,8 @@ enum PilotArguments {
       "scroll": indexed.union(["direction", "pages"]),
       "drag": ["from_x", "from_y", "to_x", "to_y"],
       "perform_secondary_action": indexed.union(["action"]),
-      "select_text": indexed.union(["text", "prefix", "suffix", "selection_type"])
+      "select_text": indexed.union(["text", "prefix", "suffix", "selection_type"]),
+      "select_option": indexed.union(["option"])
     ]
     guard let allowed = commands[command] else { return }
     let unknown = Set(arguments.keys).subtracting(target.union(allowed)).sorted()
@@ -28,6 +29,9 @@ enum PilotArguments {
       if let value = arguments[key], value.boolValue == nil {
         throw PilotRuntimeError(code: "invalid_request", message: "\(key) must be a boolean.")
       }
+    }
+    if command == "select_option", arguments["option"]?.stringValue?.isEmpty != false {
+      throw PilotRuntimeError(code: "invalid_request", message: "select_option requires a nonempty option title.")
     }
     if let value = arguments["waitForText"], value.stringValue?.isEmpty != false {
       throw PilotRuntimeError(code: "invalid_request", message: "waitForText must be a nonempty string.")

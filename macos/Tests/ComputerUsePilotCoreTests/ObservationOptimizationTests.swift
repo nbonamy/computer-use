@@ -42,6 +42,23 @@ final class ObservationOptimizationTests: XCTestCase {
     XCTAssertTrue(pilot.shouldHideMacChromeRole("scroll bar", includeMacChrome: false, insideWebContent: true))
   }
 
+  /// Reading one control with rootElementIndex must not retire the indices
+  /// of the full observation; a full read still replaces them.
+  func testScopedReadsKeepEarlierIndicesWhileFullReadsReplaceThem() {
+    XCTAssertEqual(AccessibilityPilot.observedElementIDs(previous: [1, 2, 88], observed: [137], scoped: true), [1, 2, 88, 137])
+    XCTAssertEqual(AccessibilityPilot.observedElementIDs(previous: [1, 2, 88], observed: [1, 137], scoped: false), [1, 137])
+    XCTAssertEqual(AccessibilityPilot.observedElementIDs(previous: nil, observed: [137], scoped: true), [137])
+  }
+
+  func testSelectOptionTakesAnIndexedTargetAndANonemptyOptionTitle() {
+    XCTAssertNoThrow(try PilotArguments.validate(command: "select_option",
+      arguments: ["window_id": .number(1), "element_index": .number(21), "option": .string("Canada")]))
+    XCTAssertThrowsError(try PilotArguments.validate(command: "select_option",
+      arguments: ["element_index": .number(21), "option": .string("")]))
+    XCTAssertThrowsError(try PilotArguments.validate(command: "select_option",
+      arguments: ["element_index": .number(21), "value": .string("Canada")]))
+  }
+
   /// An empty, unlabeled field (the file picker's Go To path) is still a target.
   @MainActor
   func testEmptyEditableFieldsStayVisible() {

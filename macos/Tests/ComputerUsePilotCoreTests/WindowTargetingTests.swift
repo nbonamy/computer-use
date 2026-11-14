@@ -219,6 +219,29 @@ final class WindowTargetingTests: XCTestCase {
   }
 
   @MainActor
+  /// From a browser's address bar, the first click only hands the keyboard to
+  /// the web view, which restores its last focused field; a second click lands.
+  func testBackgroundFocusClicksAgainWhenTheFirstClickOnlyEntersTheWebView() throws {
+    let app = AXUIElementCreateApplication(101)
+    let window = AXUIElementCreateApplication(102)
+    let field = AXUIElementCreateApplication(103)
+    let previousField = AXUIElementCreateApplication(104)
+    let addressBar = AXUIElementCreateApplication(105)
+    var focusedField = addressBar
+    var clicks = 0
+    let targeting = WindowTargeting(attributeReader: { element, name in
+      guard CFEqual(element, app) else { return nil }
+      return name == kAXFocusedWindowAttribute ? window : name == kAXFocusedUIElementAttribute ? focusedField : nil
+    }, backgroundFocuser: { _, requestedField in
+      clicks += 1
+      focusedField = clicks == 1 ? previousField : requestedField
+    }, focusPollInterval: 0)
+
+    XCTAssertTrue(try targeting.focusEditableInBackground(field, window: window, app: app))
+    XCTAssertEqual(clicks, 2)
+  }
+
+  @MainActor
   func testBackgroundFocusMovesFocusToTheFieldInAnotherWindowWithoutRaisingIt() throws {
     let app = AXUIElementCreateApplication(101)
     let window = AXUIElementCreateApplication(102)

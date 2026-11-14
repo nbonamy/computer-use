@@ -46,6 +46,7 @@ commands. Each tool maps to one Pilot method.
 | `computer_use_press_key` | `press_key` | Press a key or keyboard chord. | app selector, `key` |
 | `computer_use_type_text` | `type_text` | Enter plain text with keyboard events. | app selector, `text`, optional target, `replace?`, `submit?` |
 | `computer_use_set_value` | `set_value` | Set `AXValue` on a normal settable element. | app selector, `element_index`, `value` |
+| `computer_use_select_option` | `select_option` | Choose a pop-up button or web `<select>` option by its title. | app selector, `element_index`, `option` |
 | `computer_use_scroll` | `scroll` | Scroll an element or the current view. | app selector, `element_index?`, direction or deltas |
 | `computer_use_drag` | `drag` | Drag between foreground screen coordinates. | app selector, `from_x`, `from_y`, `to_x`, `to_y` |
 | `computer_use_perform_secondary_action` | `perform_secondary_action` | Invoke an action advertised by an element. | app selector, `element_index`, `action` |

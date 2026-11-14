@@ -226,20 +226,40 @@ final class WindowTargeting {
   /// SyntheticAppFocus instead. Moves keyboard focus to an editable inside a background app without
   /// activating, raising, or unminimizing anything. Returns whether focus moved.
   @discardableResult
-  func focusEditableInBackground(_ element: AXUIElement, window: AXUIElement, app: AXUIElement) throws -> Bool {
+  func focusEditableInBackground(_ element: AXUIElement, window: AXUIElement, app: AXUIElement,
+    clicking clickTarget: AXUIElement? = nil) throws -> Bool {
     if hasFocusedEditable(element, window: window, app: app) { return false }
+    // A web <select> opens its menu (raising the browser) when clicked; a
+    // click on its <label> focuses it without opening anything.
+    let clickTarget = clickTarget ?? element
     guard (attribute(window, kAXMinimizedAttribute) as? Bool) != true else {
       throw PilotRuntimeError(code: "window_focus_failed",
         message: "Background text entry cannot target a minimized window; no focus was requested.")
     }
-    if let backgroundFocuser {
-      backgroundFocuser(window, element)
-    } else if let frame = bounds(element) {
-      SyntheticAppFocus.focus(element, in: window, at: CGPoint(x: frame.midX, y: frame.midY))
-    }
-    for _ in 0..<10 {
-      if hasFocusedEditable(element, window: window, app: app) { return true }
-      RunLoop.main.run(until: Date(timeIntervalSinceNow: focusPollInterval))
+    // From a browser's address bar, the first click only hands the keyboard
+    // to the web view, which restores its previously focused field.
+    for _ in 0..<2 {
+      if let backgroundFocuser {
+        backgroundFocuser(window, element)
+      } else {
+        // A click outside the visible page cannot reach a field below the fold.
+        if AXUIElementPerformAction(clickTarget, "AXScrollToVisible" as CFString) == .success {
+          RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.15))
+        }
+        if CFEqual(clickTarget, element), let frame = bounds(element) {
+          SyntheticAppFocus.focus(element, in: window, at: CGPoint(x: frame.midX, y: frame.midY))
+        } else if let label = bounds(clickTarget), let control = bounds(element) {
+          guard let point = PopUpOptions.labelClickPoint(label: label, control: control) else {
+            throw PilotRuntimeError(code: "element_focus_failed",
+              message: "The control's label has no spot to click beside the control; nothing was clicked.")
+          }
+          SyntheticAppFocus.focus(clickTarget, in: window, at: point)
+        }
+      }
+      for _ in 0..<10 {
+        if hasFocusedEditable(element, window: window, app: app) { return true }
+        RunLoop.main.run(until: Date(timeIntervalSinceNow: focusPollInterval))
+      }
     }
     throw PilotRuntimeError(code: "element_focus_failed",
       message: "The requested editable control did not take keyboard focus in the background; no text was sent.")
