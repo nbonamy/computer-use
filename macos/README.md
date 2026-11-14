@@ -201,6 +201,10 @@ Reading one pop-up button with `get_app_state` and `rootElementIndex` lists its
 choices on its line (`options=Refund|Apology|Other`); a full observation never
 opens menus.
 
+Actions on an element return it as `target`, with its `role`, `title`, and
+`description`; `get_app_state` with `rootElementIndex` returns the inspected
+element the same way, with its `index`.
+
 `press_key` accepts a key or `+`-separated chord using X keysym-style names,
 for example `Return`, `Control_L+a`, or `Super_L+v`. Common aliases such as
 `Ctrl`, `Shift`, `Alt`, `Option`, `Command`, and `Cmd` are accepted.

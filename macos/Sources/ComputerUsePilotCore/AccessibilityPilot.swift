@@ -591,6 +591,10 @@ public final class AccessibilityPilot {
     if let rootElementIndex = scopedRoot.requestedIndex {
       result["rootElementIndex"] = .string(String(rootElementIndex))
       result["rootElementPath"] = .string(scopedRoot.path)
+      if var target = describeElement(root, path: scopedRoot.path).objectValue {
+        target["index"] = .string(String(rootElementIndex))
+        result["target"] = .object(target)
+      }
     }
 
     if includeElements {
@@ -757,14 +761,13 @@ public final class AccessibilityPilot {
     }
     let matches = { (value: String?) in PopUpOptions.titleMatches(value, option) }
     let previous = stringAttribute(target, kAXValueAttribute) ?? ""
-    if matches(previous) {
-      return .object(["value": .string(previous), "previousValue": .string(previous), "success": .bool(true)])
+    let result = { (value: String) -> JSONValue in
+      .object(["value": .string(value), "previousValue": .string(previous),
+        "target": self.describeElement(target, path: "target"), "success": .bool(true)])
     }
+    if matches(previous) { return result(previous) }
     let app = try runningApplication(arguments: arguments)
     let window = try selectedWindow(arguments: arguments)
-    let result = { (value: String) -> JSONValue in
-      .object(["value": .string(value), "previousValue": .string(previous), "success": .bool(true)])
-    }
     // Silent route: a web <select> focused through its label takes the typed
     // title, with nothing shown on screen.
     if hasWebAreaAncestor(target), let label = try? copyElementAttribute(target, kAXTitleUIElementAttribute as String),
@@ -922,6 +925,7 @@ public final class AccessibilityPilot {
       "location": .number(Double(selectedRange.location)),
       "length": .number(Double(selectedRange.length)),
       "selection_type": .string(selectionType),
+      "target": describeElement(element, path: "target"),
       "success": .bool(true)
     ])
   }
