@@ -115,7 +115,7 @@ enum SyntheticAppFocus {
     .map { unsafeBitCast($0, to: ProcessForPIDFunction.self) }
 
   /// WindowServer's front process, read directly: NSWorkspace lags behind.
-  private static func frontPID() -> pid_t? {
+  static func frontPID() -> pid_t? {
     guard let frontProcess, let processPID else { return nil }
     var psn = ProcessSerialNumber()
     var pid: pid_t = 0

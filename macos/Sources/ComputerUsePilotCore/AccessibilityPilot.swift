@@ -66,6 +66,11 @@ public final class AccessibilityPilot {
     self.targetAccessibilitySupport = targetAccessibilitySupport
   }
 
+  /// Gives target apps back the accessibility mode they had before the helper.
+  public func shutdown() {
+    targetAccessibilitySupport.restore()
+  }
+
   public func handle(_ request: PilotRequest) -> PilotResponse {
     do {
       if requiresWindowID(request) {
@@ -420,11 +425,11 @@ public final class AccessibilityPilot {
         ])
       }
       let app = try prepareKeyboardTarget(arguments: arguments, foreground: true)
-      let activated = app.isActive
+      let activated = isFrontmost(app)
       return .object([
         "activated": .bool(activated),
         "app": .object([
-          "active": .bool(app.isActive),
+          "active": .bool(activated),
           "bundleIdentifier": .from(app.bundleIdentifier),
           "localizedName": .from(app.localizedName),
           "pid": .number(Double(app.processIdentifier))
@@ -770,15 +775,16 @@ public final class AccessibilityPilot {
     let window = try selectedWindow(arguments: arguments)
     // Silent route: a web <select> focused through its label takes the typed
     // title, with nothing shown on screen.
-    if hasWebAreaAncestor(target), let label = try? copyElementAttribute(target, kAXTitleUIElementAttribute as String),
-      let value = try? selectByTypeAhead(target, label: label, option: option, app: app, window: window.element, arguments: arguments),
+    if hasWebAreaAncestor(target),
+      let value = try? selectByTypeAhead(target, label: try? copyElementAttribute(target, kAXTitleUIElementAttribute as String),
+        option: option, app: app, window: window.element, arguments: arguments),
       matches(value) {
       return result(value)
     }
     // Menu route: open the menu for an instant and press the matching item.
     let front = SyntheticAppFocus.FrontSnapshot.capture()
     defer { front.restoreSettled() }
-    guard let menu = PopUpOptions.open(target, window: window.element, front: front) else {
+    guard let menu = PopUpOptions.open(target, window: window.element, pid: app.processIdentifier, front: front) else {
       throw PilotRuntimeError(code: "action_unavailable", message: "The dropdown's menu did not open; no option was chosen.")
     }
     let titles = menu.items.map(\.title)
@@ -788,7 +794,7 @@ public final class AccessibilityPilot {
     if let choice {
       _ = AXUIElementPerformAction(menu.items[choice].element, kAXPressAction as CFString)
     } else {
-      PopUpOptions.close(menu.menu, pid: app.processIdentifier)
+      PopUpOptions.close(menu.menu, of: target, pid: app.processIdentifier)
     }
     for _ in 0..<20 {
       if let value = stringAttribute(target, kAXValueAttribute), matches(value) { return result(value) }
@@ -799,12 +805,23 @@ public final class AccessibilityPilot {
       message: "No option titled \"\(option)\"; the value is \"\(current)\". Options: \(titles.joined(separator: " | ")).")
   }
 
-  /// Focuses a web <select> by clicking its label (a click on the control
-  /// would open its menu) and types the title; returns the resulting value.
-  private func selectByTypeAhead(_ target: AXUIElement, label: AXUIElement, option: String,
+  /// Focuses a web <select> without clicking it (a click opens its menu) and
+  /// types the title; returns the resulting value. Safari focuses it through a
+  /// click on its label; Chrome, which exposes no label element, through AXFocused.
+  private func selectByTypeAhead(_ target: AXUIElement, label: AXUIElement?, option: String,
     app: NSRunningApplication, window: AXUIElement, arguments: [String: JSONValue]) throws -> String? {
-    try windowTargets.focusEditableInBackground(target, window: window,
-      app: preparedRootElement(processIdentifier: app.processIdentifier), clicking: label)
+    let root = preparedRootElement(processIdentifier: app.processIdentifier)
+    if let label {
+      try windowTargets.focusEditableInBackground(target, window: window, app: root, clicking: label)
+    } else {
+      try setAttribute(target, kAXFocusedAttribute, value: kCFBooleanTrue)
+      let focused = (0..<20).contains { _ in
+        if let element = try? copyElementAttribute(root, kAXFocusedUIElementAttribute), CFEqual(element, target) { return true }
+        RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.025))
+        return false
+      }
+      guard focused else { throw PilotRuntimeError(code: "element_focus_failed", message: "The dropdown did not take focus.") }
+    }
     try requireKeyboardFocus(targetPID: app.processIdentifier, arguments: arguments, expectedElement: target)
     // Type-ahead joins keys typed within about a second into one search.
     if let last = lastTypeAheadAt, Date().timeIntervalSince(last) < 1.1 {
@@ -840,7 +857,7 @@ public final class AccessibilityPilot {
     guard let bounds = windowTargets.bounds(window.element), bounds.contains(from), bounds.contains(to) else {
       throw PilotRuntimeError(code: "window_mismatch", message: "Drag coordinates must stay within the selected window.")
     }
-    guard app.isActive else {
+    guard isFrontmost(app) else {
       throw PilotRuntimeError(code: "action_unavailable", message: "Unable to drag because the requested app did not become active.")
     }
     showComputerUseCursor(at: from)
@@ -935,11 +952,48 @@ public final class AccessibilityPilot {
       throw PilotRuntimeError(code: "invalid_request", message: "set_value requires value.")
     }
     let element = try elementByRequiredIndexOrPath(arguments: arguments)
+    let before = stringAttribute(element, kAXValueAttribute)
     try setAttribute(element, kAXValueAttribute, value: value as CFTypeRef)
+    // Some controls (Chrome's sliders) accept the write and ignore it; a
+    // slider still moves one step at a time.
+    if !waitForValue(element, value), before.flatMap(Double.init) != nil, let to = Double(value),
+      Set(actionNames(element)).isSuperset(of: [kAXIncrementAction, kAXDecrementAction]) {
+      for _ in 0..<100 {
+        guard let current = stringAttribute(element, kAXValueAttribute), let number = Double(current), number != to,
+          AXUIElementPerformAction(element, (number < to ? kAXIncrementAction : kAXDecrementAction) as CFString) == .success
+        else { break }
+        // One step at a time: the next one waits until this one has landed.
+        _ = waitForValue(element, value, changedFrom: current)
+      }
+    }
+    let after = stringAttribute(element, kAXValueAttribute)
+    guard Self.valueMatches(after, value) || after != before else {
+      throw PilotRuntimeError(code: "action_unavailable",
+        message: "The control kept the value \"\(after ?? "")\"; set_value had no effect.")
+    }
     return .object([
       "success": .bool(true),
+      "value": after.map(JSONValue.string) ?? .null,
       "target": describeElement(element, path: "target")
     ])
+  }
+
+  /// Polls until the value is the requested one (or, given `changedFrom`, any other value).
+  private func waitForValue(_ element: AXUIElement, _ value: String, changedFrom: String? = nil) -> Bool {
+    for _ in 0..<12 {
+      let current = stringAttribute(element, kAXValueAttribute)
+      if Self.valueMatches(current, value) { return true }
+      if let changedFrom, current != changedFrom { return false }
+      RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.025))
+    }
+    return false
+  }
+
+  /// Numbers compare by value ("2" is "2.0"); anything else exactly.
+  nonisolated static func valueMatches(_ current: String?, _ requested: String) -> Bool {
+    guard let current else { return false }
+    if let a = Double(current), let b = Double(requested) { return a == b }
+    return current == requested
   }
 
   private func scroll(arguments: [String: JSONValue]) throws -> JSONValue {
@@ -1257,13 +1311,17 @@ public final class AccessibilityPilot {
     waitForActivation(app)
   }
 
+  /// isActive only refreshes while the main run loop runs, so the wait runs it
+  /// and also asks the window server which process is in front.
   private func waitForActivation(_ app: NSRunningApplication) {
-    for _ in 0..<10 {
-      if app.isActive {
-        return
-      }
-      usleep(50_000)
+    for _ in 0..<20 {
+      if isFrontmost(app) { return }
+      RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.05))
     }
+  }
+
+  private func isFrontmost(_ app: NSRunningApplication) -> Bool {
+    app.isActive || SyntheticAppFocus.frontPID() == app.processIdentifier
   }
 
   @discardableResult
@@ -1278,7 +1336,7 @@ public final class AccessibilityPilot {
     }
     let requested = app.activate(options: [.activateAllWindows])
     waitForActivation(app)
-    return requested || app.isActive
+    return requested || isFrontmost(app)
   }
 
   private func frontmostApplication() throws -> NSRunningApplication {
@@ -2397,7 +2455,7 @@ public final class AccessibilityPilot {
     let window = try selectedWindow(arguments: arguments)
     if foreground {
       _ = activate(app)
-      guard app.isActive else {
+      guard isFrontmost(app) else {
         throw PilotRuntimeError(code: "window_focus_failed", message: "The selected app could not be brought to the foreground.")
       }
     }

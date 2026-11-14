@@ -44,6 +44,14 @@ final class PopUpOptionsTests: XCTestCase {
     XCTAssertFalse(SyntheticAppFocus.FrontSnapshot.windowCovered(window: 7, wasOnTop: false, order: [42, 7]))
   }
 
+  /// Chrome lists a menu's items before their titles.
+  func testMenuTitlesAreReadOnceFilledIn() {
+    XCTAssertFalse(PopUpOptions.ready(titles: ["", "", ""], waited: 0.5))
+    XCTAssertFalse(PopUpOptions.ready(titles: ["Refund", ""], waited: 0.05))
+    XCTAssertTrue(PopUpOptions.ready(titles: ["Refund", "Other"], waited: 0))
+    XCTAssertTrue(PopUpOptions.ready(titles: ["", "Refund"], waited: 0.25))
+  }
+
   func testOptionMatchingIgnoresCaseAndSurroundingSpace() {
     XCTAssertEqual(PopUpOptions.matchingIndex(of: " replacement ", in: ["Refund", "Replacement", "Other"]), 1)
     XCTAssertNil(PopUpOptions.matchingIndex(of: "Atlantis", in: ["Refund", "Other"]))

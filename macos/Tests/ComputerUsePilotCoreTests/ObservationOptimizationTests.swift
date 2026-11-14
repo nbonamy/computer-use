@@ -50,6 +50,14 @@ final class ObservationOptimizationTests: XCTestCase {
     XCTAssertEqual(AccessibilityPilot.observedElementIDs(previous: nil, observed: [137], scoped: true), [137])
   }
 
+  /// set_value is verified: numbers compare by value, anything else exactly.
+  func testSetValueComparesNumbersByValue() {
+    XCTAssertTrue(AccessibilityPilot.valueMatches("2", "2.0"))
+    XCTAssertFalse(AccessibilityPilot.valueMatches("1", "2"))
+    XCTAssertTrue(AccessibilityPilot.valueMatches("Refund", "Refund"))
+    XCTAssertFalse(AccessibilityPilot.valueMatches(nil, "Refund"))
+  }
+
   func testSelectOptionTakesAnIndexedTargetAndANonemptyOptionTitle() {
     XCTAssertNoThrow(try PilotArguments.validate(command: "select_option",
       arguments: ["window_id": .number(1), "element_index": .number(21), "option": .string("Canada")]))

@@ -191,7 +191,9 @@ they usually reject a synthetic paste with a system beep. Tabs and newlines send
 Tab and Return. The selected window and targeted control are verified before
 typing and before an optional Return. Results report `charactersTyped`.
 An empty string inserts nothing; `replace` and `submit` still apply.
-Consumers can use `set_value` for ordinary settable controls. `select_option`
+Consumers can use `set_value` for ordinary settable controls; it returns the
+control's new `value`, moves sliders that ignore direct writes one step at a
+time, and fails when the value did not change. `select_option`
 chooses a pop-up button's option by its title, in native apps and web pages,
 and returns `value` and `previousValue`. A labeled web `<select>` is set without
 showing anything; otherwise the menu opens for an instant and the matching item

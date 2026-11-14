@@ -43,7 +43,8 @@ enum PopUpOptions {
 
   /// Opens the button's menu and returns it with its items, still open.
   @MainActor
-  static func open(_ button: AXUIElement, window: AXUIElement, front: SyntheticAppFocus.FrontSnapshot? = nil) -> Menu? {
+  static func open(_ button: AXUIElement, window: AXUIElement, pid: pid_t,
+    front: SyntheticAppFocus.FrontSnapshot? = nil) -> Menu? {
     let before = menus(in: window)
     guard AXUIElementPerformAction(button, kAXPressAction as CFString) == .success else { return nil }
     // Opening the menu orders the app's window group above the user's window;
@@ -51,20 +52,35 @@ enum PopUpOptions {
     // for the menu is slower, so it runs every 20 ms only.
     let deadline = Date().addingTimeInterval(0.6)
     var nextSearch = Date()
+    var firstSeen: Date?
+    var opened: AXUIElement?
     while Date() < deadline {
       front?.restoreIfTaken()
       RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.002))
       guard Date() >= nextSearch else { continue }
       nextSearch = Date().addingTimeInterval(0.02)
       let own = children(button).filter { role($0) == kAXMenuRole }
-      if let menu = openedMenu(ownMenus: own, before: before, after: own.isEmpty ? menus(in: window) : []) {
-        let items = children(menu).filter { role($0) == kAXMenuItemRole }.compactMap { item in
-          string(item, kAXTitleAttribute).map { (title: $0, element: item) }
-        }
-        if !items.isEmpty { return Menu(menu: menu, items: items) }
+      guard let menu = openedMenu(ownMenus: own, before: before, after: own.isEmpty ? menus(in: window) : []) else { continue }
+      opened = menu
+      // Chrome names its items by value until it fills in their titles.
+      let items = children(menu).filter { role($0) == kAXMenuItemRole }.compactMap { item -> (title: String, element: AXUIElement)? in
+        let title = string(item, kAXTitleAttribute)
+        guard let name = title?.isEmpty == false ? title : string(item, kAXValueAttribute) ?? title else { return nil }
+        return (title: name, element: item)
       }
+      guard !items.isEmpty else { continue }
+      // Chrome adds the items before their titles; give the titles a moment.
+      let seen = firstSeen ?? Date()
+      firstSeen = seen
+      if ready(titles: items.map(\.title), waited: Date().timeIntervalSince(seen)) { return Menu(menu: menu, items: items) }
     }
+    if let opened { close(opened, of: button, pid: pid) }
     return nil
+  }
+
+  /// Item titles can be read once none is empty, or once they had time to fill in.
+  static func ready(titles: [String], waited: TimeInterval) -> Bool {
+    !titles.isEmpty && (!titles.contains { $0.isEmpty } || (waited >= 0.2 && titles.contains { !$0.isEmpty }))
   }
 
   /// Reads the button's choices: opens its menu, reads, closes it.
@@ -72,17 +88,32 @@ enum PopUpOptions {
   static func options(of button: AXUIElement, window: AXUIElement, pid: pid_t) -> [String]? {
     let front = SyntheticAppFocus.FrontSnapshot.capture()
     defer { front.restoreSettled() }
-    guard let menu = open(button, window: window, front: front) else { return nil }
-    close(menu.menu, pid: pid)
+    guard let menu = open(button, window: window, pid: pid, front: front) else { return nil }
+    close(menu.menu, of: button, pid: pid)
     return menu.items.map(\.title)
   }
 
+  /// Cancels the menu and confirms it closed; Chrome can ignore a cancel sent
+  /// while its menu is still opening.
   @MainActor
-  static func close(_ menu: AXUIElement, pid: pid_t) {
-    if AXUIElementPerformAction(menu, kAXCancelAction as CFString) != .success {
-      for event in (try? KeyboardChord.parse("Escape").events()) ?? [] { event.postToPid(pid) }
+  static func close(_ menu: AXUIElement, of button: AXUIElement, pid: pid_t) {
+    for attempt in 0..<4 {
+      if attempt == 3 || AXUIElementPerformAction(menu, kAXCancelAction as CFString) != .success {
+        for event in (try? KeyboardChord.parse("Escape").events()) ?? [] { event.postToPid(pid) }
+      }
+      RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.05))
+      if !isOpen(menu, of: button) { return }
     }
-    RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.05))
+  }
+
+  /// The button says whether it is expanded when it can (web pop-ups);
+  /// otherwise a closed menu leaves the tree.
+  private static func isOpen(_ menu: AXUIElement, of button: AXUIElement) -> Bool {
+    var value: CFTypeRef?
+    if AXUIElementCopyAttributeValue(button, "AXExpanded" as CFString, &value) == .success, let expanded = value as? Bool {
+      return expanded
+    }
+    return AXUIElementCopyAttributeValue(menu, kAXRoleAttribute as CFString, &value) == .success
   }
 
   /// Menus in the window, without descending into them. Bounded for large pages.
