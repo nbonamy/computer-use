@@ -46,17 +46,20 @@ final class WindowTargeting {
   private let focusRequester: ((AXUIElement) -> Void)?
   private let raiseRequester: ((AXUIElement) -> Void)?
   private let backgroundFocuser: ((AXUIElement, AXUIElement) -> Void)?
+  private let windowOwner: (AXUIElement) -> pid_t?
   private let focusPollInterval: TimeInterval
 
   init(attributeReader: ((AXUIElement, String) -> CFTypeRef?)? = nil,
        focusRequester: ((AXUIElement) -> Void)? = nil,
        raiseRequester: ((AXUIElement) -> Void)? = nil,
        backgroundFocuser: ((AXUIElement, AXUIElement) -> Void)? = nil,
+       windowOwner: @escaping (AXUIElement) -> pid_t? = SyntheticAppFocus.ownerPID(of:),
        focusPollInterval: TimeInterval = 0.05) {
     self.attributeReader = attributeReader
     self.focusRequester = focusRequester
     self.raiseRequester = raiseRequester
     self.backgroundFocuser = backgroundFocuser
+    self.windowOwner = windowOwner
     self.focusPollInterval = focusPollInterval
   }
 
@@ -133,7 +136,81 @@ final class WindowTargeting {
   }
 
   func isKeyboardTarget(_ window: AXUIElement, app: AXUIElement) -> Bool {
-    elementAttribute(app, kAXFocusedWindowAttribute).map { CFEqual($0, window) } ?? false
+    keyboardWindow(window, app: app) != nil
+  }
+
+  /// The process that receives the selected window's keyboard input, or nil
+  /// when the window is not the app's keyboard target. A sandboxed Open/Save
+  /// panel is an empty sheet in the app; its controls are drawn, and its keys
+  /// handled, by a system service. Keys sent to the app beep there.
+  func keyboardProcess(_ window: AXUIElement, app: AXUIElement, appPID: pid_t) -> pid_t? {
+    guard let target = keyboardWindow(window, app: app) else { return nil }
+    guard attribute(target, kAXRoleAttribute) as? String == kAXSheetRole else { return appPID }
+    var queue = attribute(target, kAXChildrenAttribute) as? [AXUIElement] ?? []
+    var visited = 0
+    while !queue.isEmpty, visited < 200 {
+      let element = queue.removeFirst()
+      visited += 1
+      if let owner = windowOwner(element), owner != appPID { return owner }
+      queue.append(contentsOf: attribute(element, kAXChildrenAttribute) as? [AXUIElement] ?? [])
+    }
+    return appPID
+  }
+
+  /// A freshly opened remote panel holds no keyboard focus, so its keys go
+  /// nowhere. Returns one of the panel's labels to click (a click on a label
+  /// focuses the panel without selecting anything), or nil when the panel
+  /// already has a focused element.
+  func remotePanelFocusTarget(_ window: AXUIElement, app: AXUIElement, panelPID: pid_t) -> AXUIElement? {
+    guard let sheet = keyboardWindow(window, app: app),
+      attribute(sheet, kAXRoleAttribute) as? String == kAXSheetRole else { return nil }
+    if let focused = elementAttribute(app, kAXFocusedUIElementAttribute), contains(focused, window: sheet) { return nil }
+    var queue = attribute(sheet, kAXChildrenAttribute) as? [AXUIElement] ?? []
+    var visited = 0
+    while !queue.isEmpty, visited < 300 {
+      let element = queue.removeFirst()
+      visited += 1
+      if attribute(element, kAXRoleAttribute) as? String == kAXStaticTextRole, windowOwner(element) == panelPID {
+        return element
+      }
+      queue.append(contentsOf: attribute(element, kAXChildrenAttribute) as? [AXUIElement] ?? [])
+    }
+    return nil
+  }
+
+  /// A background Open/Save panel drops Return as a default-button shortcut,
+  /// and its AXDefaultButton stays empty. Returns the panel's enabled
+  /// OKButton when Return would confirm it, nil when a text field has focus.
+  func remotePanelDefaultButton(_ window: AXUIElement, app: AXUIElement) -> AXUIElement? {
+    guard let sheet = keyboardWindow(window, app: app),
+      attribute(sheet, kAXRoleAttribute) as? String == kAXSheetRole else { return nil }
+    if let focused = elementAttribute(app, kAXFocusedUIElementAttribute),
+      [kAXTextFieldRole, kAXTextAreaRole, kAXComboBoxRole].contains(attribute(focused, kAXRoleAttribute) as? String) {
+      return nil
+    }
+    var queue = attribute(sheet, kAXChildrenAttribute) as? [AXUIElement] ?? []
+    var visited = 0
+    while !queue.isEmpty, visited < 300 {
+      let element = queue.removeFirst()
+      visited += 1
+      if attribute(element, kAXRoleAttribute) as? String == kAXButtonRole,
+        attribute(element, kAXIdentifierAttribute) as? String == "OKButton" {
+        return (attribute(element, kAXEnabledAttribute) as? Bool) == true ? element : nil
+      }
+      queue.append(contentsOf: attribute(element, kAXChildrenAttribute) as? [AXUIElement] ?? [])
+    }
+    return nil
+  }
+
+  /// Native file pickers and their Go To sheets can own keyboard focus while
+  /// AXWindows still lists only their parent. Require a verified attachment;
+  /// a different ordinary window or an unrelated sheet is never a substitute.
+  func keyboardWindow(_ window: AXUIElement, app: AXUIElement) -> AXUIElement? {
+    guard let focused = elementAttribute(app, kAXFocusedWindowAttribute) else { return nil }
+    if CFEqual(focused, window) { return focused }
+    guard attribute(focused, kAXRoleAttribute) as? String == kAXSheetRole,
+      contains(focused, window: window) else { return nil }
+    return focused
   }
 
   /// Background text preflight never selects, unminimizes, or raises a window.

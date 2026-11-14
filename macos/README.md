@@ -105,6 +105,12 @@ the requested window's keyboard focus before delivery, returning
 raise the window. Physical
 clicks, drags, and unindexed scrolling additionally activate the app.
 
+An attached native sheet remains part of its parent `window_id`, including a
+file picker's nested Go To sheet. Keyboard focus may belong to that sheet when
+its AX parent/window relationship proves it belongs to the selected window.
+A separately listed dialog window requires its own `window_id`; unrelated
+windows and unverified sheet attachments do not satisfy the focus check.
+
 `screenshot` accepts `scope: "window" | "screen"`. Window capture is the
 default and accepts the standard optional app selector (`app`, `pid`, or the
 frontmost application when omitted). Screen capture defaults to the main
@@ -170,6 +176,12 @@ and pointer stay unchanged, and new text is appended after existing content
 unless `replace` is set. Minimized windows are refused, and focus that does not
 move returns an error before input. Untargeted text requires the selected window
 to already hold the app's keyboard focus.
+
+File pickers work in background apps. Press `Super+Shift+g`, type the full path
+into the Go To field with `type_text` (`replace` and `submit` work as usual),
+then observe the selected filename and the enabled Open/Upload button before
+pressing Return to confirm. The app you are using stays in front. A posted key
+or typed-character count alone does not confirm that the app selected the file.
 
 `type_text` types text as keystrokes, which background apps accept silently;
 they usually reject a synthetic paste with a system beep. Tabs and newlines send

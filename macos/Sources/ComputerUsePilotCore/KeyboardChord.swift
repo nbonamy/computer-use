@@ -6,6 +6,31 @@ struct KeyboardChord: Equatable, Sendable {
   let keyCode: CGKeyCode?
   let text: String?
 
+  /// The key down/up pair; built before delivery so nothing is half-sent.
+  func events() throws -> [CGEvent] {
+    let source = CGEventSource(stateID: .hidSystemState)
+    return try [true, false].map { down in
+      guard let event = CGEvent(keyboardEventSource: source, virtualKey: keyCode ?? 0, keyDown: down) else {
+        throw PilotRuntimeError(code: "action_unavailable", message: "Could not create the keyboard event; no input was sent.")
+      }
+      if let text {
+        let units = Array(text.utf16)
+        event.keyboardSetUnicodeString(stringLength: units.count, unicodeString: units)
+      } else {
+        event.flags = flags
+      }
+      return event
+    }
+  }
+
+  /// A sandboxed Open/Save panel in a background app drops modified
+  /// shortcuts but handles plain keys: a typed "/" opens Go To. BackSpace
+  /// clears that "/", leaving the field the shortcut would have shown.
+  func remotePanelEquivalent() -> [KeyboardChord]? {
+    guard keyCode == 5, flags == [.maskCommand, .maskShift] else { return nil }
+    return [KeyboardChord(flags: [], keyCode: nil, text: "/"), KeyboardChord(flags: [], keyCode: 51, text: nil)]
+  }
+
   static func parse(_ value: String) throws -> KeyboardChord {
     let parts = value.split(separator: "+", omittingEmptySubsequences: false)
       .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }

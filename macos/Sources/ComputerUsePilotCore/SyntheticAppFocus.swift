@@ -22,6 +22,37 @@ enum SyntheticAppFocus {
     return windowID
   }
 
+  private typealias MainConnectionFunction = @convention(c) () -> UInt32
+  private typealias WindowOwnerFunction = @convention(c) (UInt32, UInt32, UnsafeMutablePointer<UInt32>) -> Int32
+  private typealias ConnectionPSNFunction = @convention(c) (UInt32, UnsafeMutablePointer<ProcessSerialNumber>) -> Int32
+  private typealias ProcessPIDFunction = @convention(c) (UnsafePointer<ProcessSerialNumber>, UnsafeMutablePointer<pid_t>) -> Int32
+
+  private static func skyLightSymbol(_ name: String) -> UnsafeMutableRawPointer? {
+    dlsym(dlopen("/System/Library/PrivateFrameworks/SkyLight.framework/SkyLight", RTLD_LAZY), name)
+  }
+  private static let mainConnection: MainConnectionFunction? = skyLightSymbol("SLSMainConnectionID")
+    .map { unsafeBitCast($0, to: MainConnectionFunction.self) }
+  private static let windowOwner: WindowOwnerFunction? = skyLightSymbol("SLSGetWindowOwner")
+    .map { unsafeBitCast($0, to: WindowOwnerFunction.self) }
+  private static let connectionPSN: ConnectionPSNFunction? = skyLightSymbol("SLSGetConnectionPSN")
+    .map { unsafeBitCast($0, to: ConnectionPSNFunction.self) }
+  private static let processPID: ProcessPIDFunction? = dlsym(UnsafeMutableRawPointer(bitPattern: -2), "GetProcessPID")
+    .map { unsafeBitCast($0, to: ProcessPIDFunction.self) }
+
+  /// The process WindowServer says draws the element's window. Remote views
+  /// (sandboxed Open/Save panels) are drawn by a service, not the app whose
+  /// accessibility tree exposes them, and the public window list omits them.
+  static func ownerPID(of element: AXUIElement) -> pid_t? {
+    guard let windowID = windowID(of: element), let mainConnection, let windowOwner,
+      let connectionPSN, let processPID else { return nil }
+    var connection: UInt32 = 0
+    var psn = ProcessSerialNumber()
+    var pid: pid_t = 0
+    guard windowOwner(mainConnection(), windowID, &connection) == 0, connection != 0,
+      connectionPSN(connection, &psn) == 0, processPID(&psn, &pid) == 0, pid > 0 else { return nil }
+    return pid
+  }
+
   /// Without this, a click on an inactive app makes AppKit activate it.
   static func activationEvent(windowID: CGWindowID) -> CGEvent? {
     NSEvent.otherEvent(with: .appKitDefined, location: .zero,
@@ -43,6 +74,72 @@ enum SyntheticAppFocus {
       event.setIntegerValueField(windowThatCanHandleEventField, value: Int64(windowID))
       event.location = point
       return event
+    }
+  }
+
+  private typealias FrontProcessFunction = @convention(c) (UnsafeMutableRawPointer) -> Int32
+  private typealias SetFrontProcessFunction = @convention(c) (UnsafeRawPointer, UInt32, UInt32) -> Int32
+  private typealias PostEventRecordFunction = @convention(c) (UnsafeRawPointer, UnsafeRawPointer) -> Int32
+  private typealias ProcessForPIDFunction = @convention(c) (pid_t, UnsafeMutableRawPointer) -> Int32
+
+  private static let frontProcess: FrontProcessFunction? = skyLightSymbol("_SLPSGetFrontProcess")
+    .map { unsafeBitCast($0, to: FrontProcessFunction.self) }
+  private static let setFrontProcess: SetFrontProcessFunction? = skyLightSymbol("_SLPSSetFrontProcessWithOptions")
+    .map { unsafeBitCast($0, to: SetFrontProcessFunction.self) }
+  private static let postEventRecord: PostEventRecordFunction? = skyLightSymbol("SLPSPostEventRecordTo")
+    .map { unsafeBitCast($0, to: PostEventRecordFunction.self) }
+  private static let processForPID: ProcessForPIDFunction? = dlsym(UnsafeMutableRawPointer(bitPattern: -2), "GetProcessForPID")
+    .map { unsafeBitCast($0, to: ProcessForPIDFunction.self) }
+
+  /// WindowServer's front process, read directly: NSWorkspace lags behind.
+  private static func frontPID() -> pid_t? {
+    guard let frontProcess, let processPID else { return nil }
+    var psn = ProcessSerialNumber()
+    var pid: pid_t = 0
+    guard frontProcess(&psn) == 0, processPID(&psn, &pid) == 0 else { return nil }
+    return pid
+  }
+
+  /// Hand the front process and key window straight back to the user's app.
+  private static func returnFront(to pid: pid_t, window: CGWindowID) {
+    guard let setFrontProcess, let postEventRecord, let processForPID else { return }
+    var psn = ProcessSerialNumber()
+    guard processForPID(pid, &psn) == 0 else { return }
+    _ = setFrontProcess(&psn, window, 0x200)
+    for kind: UInt8 in [0x01, 0x02] {
+      var record = [UInt8](repeating: 0, count: 0xF8)
+      record[0x04] = 0xF8
+      record[0x08] = kind
+      record[0x3A] = 0x10
+      withUnsafeBytes(of: window.littleEndian) { for (offset, byte) in $0.enumerated() { record[0x3C + offset] = byte } }
+      for offset in 0x20..<0x30 { record[offset] = 0xFF }
+      _ = postEventRecord(&psn, record)
+    }
+  }
+
+  /// A remote Open/Save panel takes keyboard focus only from a click, and the
+  /// panel service answers that click by activating its host app. Click one
+  /// of the panel's labels, then give the front process back to the app the
+  /// user was in before it can repaint (about 40 ms).
+  static func focusRemotePanel(panelPID: pid_t, windowID: CGWindowID, at point: CGPoint) {
+    let userFront = frontPID()
+    let userWindow = userFront.flatMap { pid -> CGWindowID? in
+      var focused: CFTypeRef?
+      guard AXUIElementCopyAttributeValue(AXUIElementCreateApplication(pid), kAXFocusedWindowAttribute as CFString, &focused) == .success,
+        let focused, CFGetTypeID(focused) == AXUIElementGetTypeID() else { return nil }
+      return self.windowID(of: focused as! AXUIElement)
+    }
+    for event in clickEvents(at: point, windowID: windowID) {
+      event.postToPid(panelPID)
+      usleep(20_000)
+    }
+    guard let userFront, let userWindow else { return }
+    for _ in 0..<60 {
+      if let front = frontPID(), front != userFront {
+        returnFront(to: userFront, window: userWindow)
+        return
+      }
+      usleep(5_000)
     }
   }
 

@@ -474,7 +474,8 @@ public final class AccessibilityPilot {
       visitedCount: &visitedCount,
       elements: &elements,
       stateRows: &stateRows,
-      observedElementIDs: &observedElementIDs
+      observedElementIDs: &observedElementIDs,
+      insideWebContent: hasWebAreaAncestor(root)
     )
     latestObservedElementIDsByPID[app.processIdentifier] = observedElementIDs
     let focusedElement = elements.first { element in
@@ -695,13 +696,16 @@ public final class AccessibilityPilot {
     }
     try requireKeyboardFocus(targetPID: app.processIdentifier, arguments: arguments, expectedElement: target)
     if arguments["replace"]?.boolValue == true {
-      postKeyboardChord(try KeyboardChord.parse("Super_L+a"), targetPID: app.processIdentifier)
+      let remotePanel = try keyboardProcess(targetPID: app.processIdentifier, arguments: arguments) != app.processIdentifier
+      if !(remotePanel && target.map(selectAllText) == true) {
+        try postKeyboardChord(try KeyboardChord.parse("Super_L+a"), targetPID: app.processIdentifier, arguments: arguments)
+      }
     }
     // Background apps reject a synthetic Cmd+V with a system beep; keystrokes land.
     try postKeyboardText(text, targetPID: app.processIdentifier, arguments: arguments, expectedElement: target)
     if arguments["submit"]?.boolValue == true {
       try requireKeyboardFocus(targetPID: app.processIdentifier, arguments: arguments, expectedElement: target)
-      postKeyboardChord(try KeyboardChord.parse("Return"), targetPID: app.processIdentifier)
+      try postKeyboardChord(try KeyboardChord.parse("Return"), targetPID: app.processIdentifier, arguments: arguments)
     }
     return .object(["charactersTyped": .number(Double(text.count)), "success": .bool(true)])
   }
@@ -715,7 +719,7 @@ public final class AccessibilityPilot {
     guard keyboardTargetIsRunning(app.processIdentifier) else {
       throw PilotRuntimeError(code: "action_unavailable", message: "The requested app is no longer running.")
     }
-    postKeyboardChord(chord, targetPID: app.processIdentifier)
+    try postKeyboardChord(chord, targetPID: app.processIdentifier, arguments: arguments)
     return .object(["key": .string(key), "success": .bool(true)])
   }
 
@@ -1351,7 +1355,8 @@ public final class AccessibilityPilot {
     elements: inout [JSONValue],
     stateRows: inout [AccessibilityStateRow],
     observedElementIDs: inout Set<Int>,
-    ancestorLabels: Set<String> = []
+    ancestorLabels: Set<String> = [],
+    insideWebContent: Bool = false
   ) -> JSONValue {
     guard consumeNode(&remaining) else {
       return .object(["truncated": .bool(true)])
@@ -1371,7 +1376,8 @@ public final class AccessibilityPilot {
     node["actions"] = .array(actionNames(element).map { .string($0) })
     enrichCompactLineNode(&node, from: element)
     let role = humanRole(node["role"]?.stringValue)
-    let rendered = shouldRenderStateLine(node, depth: depth, parentRole: parentRole, includeMacChrome: includeMacChrome, ancestorLabels: ancestorLabels)
+    let rendered = shouldRenderStateLine(node, depth: depth, parentRole: parentRole, includeMacChrome: includeMacChrome,
+      ancestorLabels: ancestorLabels, insideWebContent: insideWebContent)
     if rendered {
       let line = "\(stateLineIndent(depth))\(elementLine(node))"
       stateRows.append(AccessibilityStateRow(
@@ -1409,7 +1415,8 @@ public final class AccessibilityPilot {
         elements: &elements,
         stateRows: &stateRows,
         observedElementIDs: &observedElementIDs,
-        ancestorLabels: childLabels
+        ancestorLabels: childLabels,
+        insideWebContent: insideWebContent || role == "web area"
       )
     }
     node["children"] = .array(childNodes)
@@ -1508,12 +1515,15 @@ public final class AccessibilityPilot {
     depth: Int,
     parentRole: String?,
     includeMacChrome: Bool,
-    ancestorLabels: Set<String> = []
+    ancestorLabels: Set<String> = [],
+    insideWebContent: Bool = false
   ) -> Bool {
     let role = humanRole(element["role"]?.stringValue)
     // Short static text includes prices, stock status, and sizes. Never drop it
     // merely because it could have been a label for a subsequent control.
-    if roleIsReadableText(role) && !hasAnyTextAttribute(element) { return false }
+    // An empty editable field is still a target, even without a label.
+    if roleIsReadableText(role) && !hasAnyTextAttribute(element),
+       element["settable"]?.boolValue != true, element["focused"]?.boolValue != true { return false }
     if roleIsReadableText(role), element["focused"]?.boolValue != true,
        element["settable"]?.boolValue != true,
        !stateTextLabels(element).isEmpty,
@@ -1528,7 +1538,7 @@ public final class AccessibilityPilot {
     if role == "cell" && parentRole == "row" {
       return false
     }
-    if shouldHideCompactStateLine(element, role: role, includeMacChrome: includeMacChrome) {
+    if shouldHideCompactStateLine(element, role: role, includeMacChrome: includeMacChrome, insideWebContent: insideWebContent) {
       return false
     }
     if depth <= 2 {
@@ -1557,9 +1567,13 @@ public final class AccessibilityPilot {
   private func shouldHideCompactStateLine(
     _ element: [String: JSONValue],
     role: String,
-    includeMacChrome: Bool
+    includeMacChrome: Bool,
+    insideWebContent: Bool
   ) -> Bool {
-    if shouldHideMacChromeRole(role, includeMacChrome: includeMacChrome) {
+    // A web menu item is page content only when it carries its own label;
+    // unlabeled wrappers around links stay hidden like menu containers.
+    let labeledWebMenuItem = insideWebContent && role == "menu item" && hasAnyTextAttribute(element)
+    if shouldHideMacChromeRole(role, includeMacChrome: includeMacChrome, insideWebContent: labeledWebMenuItem) {
       return true
     }
     if roleIsListItem(role) && !hasAnyTextAttribute(element) && element["selected"]?.boolValue != true {
@@ -1813,17 +1827,29 @@ public final class AccessibilityPilot {
     return false
   }
 
-  func shouldHideMacChromeRole(_ role: String, includeMacChrome: Bool) -> Bool {
+  /// A web page's menus (ARIA menu/menuitem) are page content, not Mac chrome.
+  func shouldHideMacChromeRole(_ role: String, includeMacChrome: Bool, insideWebContent: Bool = false) -> Bool {
     !includeMacChrome && (
       role == "menu bar" ||
-      role == "menu" ||
+      (role == "menu" && !insideWebContent) ||
       role == "menu bar item" ||
-      role == "menu item" ||
+      (role == "menu item" && !insideWebContent) ||
       role == "scroll bar" ||
       role == "splitter" ||
       role == "toolbar" ||
       role == "value indicator"
     )
+  }
+
+  /// A scoped observation (rootElementIndex) can start inside a web page.
+  private func hasWebAreaAncestor(_ element: AXUIElement) -> Bool {
+    var current = element
+    for _ in 0..<40 {
+      guard let parent = try? copyElementAttribute(current, kAXParentAttribute as String) else { return false }
+      if (windowTargets.attribute(parent, kAXRoleAttribute) as? String) == "AXWebArea" { return true }
+      current = parent
+    }
+    return false
   }
 
   private func roleIsReadableText(_ role: String) -> Bool {
@@ -2144,6 +2170,7 @@ public final class AccessibilityPilot {
     let source = CGEventSource(stateID: .hidSystemState)
     let window = try selectedWindow(arguments: arguments)
     let appRoot = preparedRootElement(processIdentifier: targetPID)
+    let destination = try keyboardProcess(targetPID: targetPID, arguments: arguments)
     let input = TargetBoundKeyboardInput(
       isTargetFocused: { [self] pid in
         guard keyboardTargetIsRunning(pid), windowTargets.isKeyboardTarget(window.element, app: appRoot) else { return false }
@@ -2154,11 +2181,11 @@ public final class AccessibilityPilot {
       postCharacter: { [self] character in
         switch character {
         case "\n", "\r":
-          postKey(source: source, keyCode: 36, targetPID: targetPID)
+          postKey(source: source, keyCode: 36, targetPID: destination)
         case "\t":
-          postKey(source: source, keyCode: 48, targetPID: targetPID)
+          postKey(source: source, keyCode: 48, targetPID: destination)
         default:
-          postUnicodeCharacter(source: source, character, targetPID: targetPID)
+          postUnicodeCharacter(source: source, character, targetPID: destination)
         }
       }
     )
@@ -2209,7 +2236,7 @@ public final class AccessibilityPilot {
     }
     return try PasteboardSnapshot.withTemporaryContents([item], on: .general) {
       try requireKeyboardFocus(targetPID: targetPID, arguments: arguments, expectedElement: expectedElement)
-      postKeyboardChord(try KeyboardChord.parse("Super_L+v"), targetPID: targetPID)
+      try postKeyboardChord(try KeyboardChord.parse("Super_L+v"), targetPID: targetPID, arguments: arguments)
       // Paste delivery is asynchronous. Keep the payload available while the
       // target handles the shortcut, then release our temporary clipboard.
       RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.1))
@@ -2238,19 +2265,78 @@ public final class AccessibilityPilot {
     return app
   }
 
-  private func postKeyboardChord(_ chord: KeyboardChord, targetPID: pid_t) {
-    let source = CGEventSource(stateID: .hidSystemState)
-    if let text = chord.text, let character = text.first {
-      postUnicodeCharacter(source: source, character, targetPID: targetPID)
+  private func postKeyboardChord(_ chord: KeyboardChord, targetPID: pid_t, arguments: [String: JSONValue]) throws {
+    let events = try chord.events()
+    try requireKeyboardFocus(targetPID: targetPID, arguments: arguments)
+    let destination = try keyboardProcess(targetPID: targetPID, arguments: arguments)
+    if destination != targetPID, chord.keyCode == 36, chord.flags.isEmpty,
+      let button = windowTargets.remotePanelDefaultButton(try selectedWindow(arguments: arguments).element,
+        app: preparedRootElement(processIdentifier: targetPID)) {
+      guard AXUIElementPerformAction(button, kAXPressAction as CFString) == .success else {
+        throw PilotRuntimeError(code: "action_unavailable", message: "The file panel's confirm button did not respond; nothing was confirmed.")
+      }
       return
     }
-    guard let keyCode = chord.keyCode else { return }
-    let down = CGEvent(keyboardEventSource: source, virtualKey: keyCode, keyDown: true)
-    down?.flags = chord.flags
-    down?.postToPid(targetPID)
-    let up = CGEvent(keyboardEventSource: source, virtualKey: keyCode, keyDown: false)
-    up?.flags = chord.flags
-    up?.postToPid(targetPID)
+    guard destination != targetPID, let equivalent = chord.remotePanelEquivalent() else {
+      for event in events { event.postToPid(destination) }
+      return
+    }
+    // Each key of the equivalent waits for the text field the previous one opened.
+    for (offset, key) in equivalent.enumerated() {
+      if offset > 0 { waitForFocusedTextField(targetPID: targetPID) }
+      for event in try key.events() { event.postToPid(destination) }
+    }
+  }
+
+  private func waitForFocusedTextField(targetPID: pid_t) {
+    let root = preparedRootElement(processIdentifier: targetPID)
+    for _ in 0..<40 {
+      if let focused = try? copyElementAttribute(root, kAXFocusedUIElementAttribute as String),
+        windowTargets.attribute(focused, kAXRoleAttribute) as? String == kAXTextFieldRole { return }
+      RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.025))
+    }
+  }
+
+  /// Selects a field's whole value through accessibility; a background
+  /// Open/Save panel drops the Cmd+A that replace otherwise sends.
+  private func selectAllText(_ element: AXUIElement) -> Bool {
+    let length = (stringAttribute(element, kAXValueAttribute) as NSString?)?.length ?? 0
+    var range = CFRange(location: 0, length: length)
+    guard let value = AXValueCreate(.cfRange, &range) else { return false }
+    return AXUIElementSetAttributeValue(element, kAXSelectedTextRangeAttribute as CFString, value) == .success
+  }
+
+  /// Where the selected window's keys must go: the app, or the system service
+  /// that draws an attached remote sheet such as a sandboxed file picker.
+  private func keyboardProcess(targetPID: pid_t, arguments: [String: JSONValue]) throws -> pid_t {
+    let selected = try selectedWindow(arguments: arguments)
+    let root = preparedRootElement(processIdentifier: targetPID)
+    guard let destination = windowTargets.keyboardProcess(selected.element, app: root, appPID: targetPID),
+      kill(destination, 0) == 0 else {
+      throw PilotRuntimeError(code: "action_unavailable", message: "The selected window lost keyboard focus or the app exited; no further input was sent.")
+    }
+    if destination != targetPID {
+      try focusRemotePanelIfNeeded(selected.element, root: root, panelPID: destination)
+    }
+    return destination
+  }
+
+  private func focusRemotePanelIfNeeded(_ window: AXUIElement, root: AXUIElement, panelPID: pid_t) throws {
+    guard let label = windowTargets.remotePanelFocusTarget(window, app: root, panelPID: panelPID) else { return }
+    guard let frame = windowTargets.bounds(label), let windowID = SyntheticAppFocus.windowID(of: label) else {
+      throw PilotRuntimeError(code: "element_focus_failed", message: "The file panel has no keyboard focus and no place to give it focus; no input was sent.")
+    }
+    SyntheticAppFocus.focusRemotePanel(panelPID: panelPID, windowID: windowID, at: CGPoint(x: frame.midX, y: frame.midY))
+    for _ in 0..<20 {
+      if windowTargets.remotePanelFocusTarget(window, app: root, panelPID: panelPID) == nil {
+        // The panel reports focus before it handles keys; the first key
+        // sent right away is dropped.
+        RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.2))
+        return
+      }
+      RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.025))
+    }
+    throw PilotRuntimeError(code: "element_focus_failed", message: "The file panel did not take keyboard focus; no input was sent.")
   }
 
   private func stableElementIndex(for element: AXUIElement) -> Int {

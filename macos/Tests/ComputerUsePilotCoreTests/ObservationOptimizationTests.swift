@@ -25,6 +25,33 @@ final class ObservationOptimizationTests: XCTestCase {
     XCTAssertFalse(pilot.shouldRenderStateLine(empty, depth: 1, parentRole: "group", includeMacChrome: false))
   }
 
+  /// YouTube Studio's Create menu is an ARIA menu: "Upload videos" is a titled
+  /// AXMenuItem inside the web area, not Mac menu chrome.
+  @MainActor
+  func testWebPageMenuItemsRenderWhileNativeMenusStayHidden() {
+    let pilot = AccessibilityPilot(initialCursorPresenter: {})
+    let item: [String: JSONValue] = ["role": .string("AXMenuItem"), "title": .string("Upload videos"),
+      "actions": .array([.string("AXPress")])]
+    let menu: [String: JSONValue] = ["role": .string("AXMenu"), "actions": .array([.string("AXPress")])]
+    // Unlabeled wrappers (a navigation menu's items around their links) stay quiet.
+    let wrapper: [String: JSONValue] = ["role": .string("AXMenuItem"), "actions": .array([.string("AXCancel")])]
+    XCTAssertTrue(pilot.shouldRenderStateLine(item, depth: 9, parentRole: "menu", includeMacChrome: false, insideWebContent: true))
+    XCTAssertFalse(pilot.shouldRenderStateLine(menu, depth: 8, parentRole: "group", includeMacChrome: false, insideWebContent: true))
+    XCTAssertFalse(pilot.shouldRenderStateLine(wrapper, depth: 9, parentRole: "menu", includeMacChrome: false, insideWebContent: true))
+    XCTAssertFalse(pilot.shouldRenderStateLine(item, depth: 9, parentRole: "menu", includeMacChrome: false))
+    XCTAssertTrue(pilot.shouldHideMacChromeRole("scroll bar", includeMacChrome: false, insideWebContent: true))
+  }
+
+  /// An empty, unlabeled field (the file picker's Go To path) is still a target.
+  @MainActor
+  func testEmptyEditableFieldsStayVisible() {
+    let pilot = AccessibilityPilot(initialCursorPresenter: {})
+    let field: [String: JSONValue] = ["role": .string("AXTextField"), "settable": .bool(true)]
+    let text: [String: JSONValue] = ["role": .string("AXStaticText")]
+    XCTAssertTrue(pilot.shouldRenderStateLine(field, depth: 3, parentRole: "sheet", includeMacChrome: false))
+    XCTAssertFalse(pilot.shouldRenderStateLine(text, depth: 3, parentRole: "group", includeMacChrome: false))
+  }
+
   func testExpectedTextIsNotHeldHostageByUnrelatedChangingContent() {
     var settler = ObservationSettler()
     XCTAssertFalse(settler.ready(signature: "Added to cart ad 1", busy: false, elapsed: 0, expected: "Added to cart"))
