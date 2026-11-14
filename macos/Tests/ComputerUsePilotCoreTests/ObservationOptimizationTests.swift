@@ -77,6 +77,16 @@ final class ObservationOptimizationTests: XCTestCase {
     XCTAssertFalse(pilot.shouldRenderStateLine(text, depth: 3, parentRole: "group", includeMacChrome: false))
   }
 
+  /// A closed Chrome <select> keeps its current choice as a child item; it
+  /// repeats the value and reads like a one-option list, so it is hidden.
+  @MainActor
+  func testClosedDropdownsHideTheirCurrentChoiceItem() {
+    let pilot = AccessibilityPilot(initialCursorPresenter: {})
+    let item: [String: JSONValue] = ["role": .string("AXMenuItem"), "value": .string("Refund"), "selected": .bool(true)]
+    XCTAssertFalse(pilot.shouldRenderStateLine(item, depth: 9, parentRole: "pop up button", includeMacChrome: false, insideWebContent: true))
+    XCTAssertTrue(pilot.shouldRenderStateLine(item, depth: 9, parentRole: "menu", includeMacChrome: false, insideWebContent: true))
+  }
+
   func testExpectedTextIsNotHeldHostageByUnrelatedChangingContent() {
     var settler = ObservationSettler()
     XCTAssertFalse(settler.ready(signature: "Added to cart ad 1", busy: false, elapsed: 0, expected: "Added to cart"))

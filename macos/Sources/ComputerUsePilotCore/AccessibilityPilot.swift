@@ -1703,6 +1703,11 @@ public final class AccessibilityPilot {
     if parentRole == "cell", roleIsReadableText(role) {
       return false
     }
+    // A closed Chrome <select> keeps its current choice as a child item; the
+    // button's value already says it. An open menu's items sit under a menu.
+    if role == "menu item", parentRole == "pop up button" {
+      return false
+    }
     if role == "cell" && parentRole == "row" {
       return false
     }

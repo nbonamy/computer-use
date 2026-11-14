@@ -45,13 +45,17 @@ enum PopUpOptions {
   @MainActor
   static func open(_ button: AXUIElement, window: AXUIElement, pid: pid_t,
     front: SyntheticAppFocus.FrontSnapshot? = nil) -> Menu? {
-    let before = menus(in: window)
+    // AppKit and Chrome open the menu under the button; Safari adds it
+    // elsewhere in the page, which only a (slow) page search finds. A button
+    // with children of its own keeps its menu there.
+    let searchesPage = children(button).isEmpty
+    let before = searchesPage ? menus(in: window) : []
     guard AXUIElementPerformAction(button, kAXPressAction as CFString) == .success else { return nil }
     // Opening the menu orders the app's window group above the user's window;
-    // put the user's window back the moment that happens. Searching the page
-    // for the menu is slower, so it runs every 20 ms only.
-    let deadline = Date().addingTimeInterval(0.6)
+    // put the user's window back the moment that happens.
+    let deadline = Date().addingTimeInterval(1.0)
     var nextSearch = Date()
+    var nextPageSearch = Date()
     var firstSeen: Date?
     var opened: AXUIElement?
     while Date() < deadline {
@@ -60,7 +64,12 @@ enum PopUpOptions {
       guard Date() >= nextSearch else { continue }
       nextSearch = Date().addingTimeInterval(0.02)
       let own = children(button).filter { role($0) == kAXMenuRole }
-      guard let menu = openedMenu(ownMenus: own, before: before, after: own.isEmpty ? menus(in: window) : []) else { continue }
+      var after: [AXUIElement] = []
+      if own.isEmpty, searchesPage, Date() >= nextPageSearch {
+        after = menus(in: window)
+        nextPageSearch = Date().addingTimeInterval(0.03)
+      }
+      guard let menu = openedMenu(ownMenus: own, before: before, after: after) else { continue }
       opened = menu
       // Chrome names its items by value until it fills in their titles.
       let items = children(menu).filter { role($0) == kAXMenuItemRole }.compactMap { item -> (title: String, element: AXUIElement)? in
@@ -74,7 +83,12 @@ enum PopUpOptions {
       firstSeen = seen
       if ready(titles: items.map(\.title), waited: Date().timeIntervalSince(seen)) { return Menu(menu: menu, items: items) }
     }
-    if let opened { close(opened, of: button, pid: pid) }
+    // Never leave a menu open, even one that was not recognized.
+    if let opened {
+      close(opened, of: button, pid: pid)
+    } else if isExpanded(button) == true {
+      for event in (try? KeyboardChord.parse("Escape").events()) ?? [] { event.postToPid(pid) }
+    }
     return nil
   }
 
@@ -109,11 +123,15 @@ enum PopUpOptions {
   /// The button says whether it is expanded when it can (web pop-ups);
   /// otherwise a closed menu leaves the tree.
   private static func isOpen(_ menu: AXUIElement, of button: AXUIElement) -> Bool {
+    if let expanded = isExpanded(button) { return expanded }
     var value: CFTypeRef?
-    if AXUIElementCopyAttributeValue(button, "AXExpanded" as CFString, &value) == .success, let expanded = value as? Bool {
-      return expanded
-    }
     return AXUIElementCopyAttributeValue(menu, kAXRoleAttribute as CFString, &value) == .success
+  }
+
+  private static func isExpanded(_ button: AXUIElement) -> Bool? {
+    var value: CFTypeRef?
+    guard AXUIElementCopyAttributeValue(button, "AXExpanded" as CFString, &value) == .success else { return nil }
+    return value as? Bool
   }
 
   /// Menus in the window, without descending into them. Bounded for large pages.
